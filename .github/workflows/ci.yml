@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck, build and test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      # Unit and contract tests use fake scanners: no binaries, no network.
+      - run: npm test
+
+      # Smoke test of the built CLI. Without scanners the only honest answer
+      # is INCOMPLETE (exit 2); anything else is a regression.
+      - name: CLI smoke test
+        run: |
+          node dist/cli/index.js --help
+          set +e
+          node dist/cli/index.js scan --repo . --ref HEAD --out "$RUNNER_TEMP/report.json"
+          code=$?
+          set -e
+          test "$code" -eq 2
+          node -e '
+            const r = require(process.argv[1]);
+            if (r.status !== "INCOMPLETE" || r.formatVersion !== "1.0") process.exit(1);
+          ' "$RUNNER_TEMP/report.json"
