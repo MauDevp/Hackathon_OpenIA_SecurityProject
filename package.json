@@ -1,6 +1,6 @@
 {
   "name": "guardia-offline",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Local, deterministic and verifiable review of code changes and dependencies, built on existing open source scanners.",
   "license": "Apache-2.0",
   "private": true,
