@@ -1,0 +1,111 @@
+# DMsecurity scheduled scan for GitHub Actions.
+#
+# Copy this file to .github/workflows/dmsecurity.yml in the repository you want
+# to watch. Every weekday morning (and on demand) it scans the default branch
+# offline, uploads the JSON report as an artifact and, when the result is not
+# PASS, opens or updates one issue labelled "dmsecurity". GitHub notifies you
+# about that issue and about the failed run: that is the alert.
+#
+# The report never contains secret values, but it does name files and advisory
+# ids, so keep the artifact retention short and the issue body is a summary.
+name: DMsecurity scan
+
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  DMSECURITY_REF: main # tag or commit of DMsecurity to use
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out DMsecurity
+        uses: actions/checkout@v4
+        with:
+          repository: MauDevp/Hackathon_OpenIA_SecurityProject
+          ref: ${{ env.DMSECURITY_REF }}
+          path: .dmsecurity
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The advisory database is about 220 MB per ecosystem; keep it for a week.
+      - name: Cache scanners and advisory database
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: .dmsecurity/.guardia
+          key: dmsecurity-guardia-${{ env.DMSECURITY_REF }}-${{ steps.week.outputs.week }}
+
+      - name: Build DMsecurity and install the scanners
+        working-directory: .dmsecurity
+        run: |
+          npm ci
+          npm run build
+          # One --lockfile per lockfile found at the root of the watched repository,
+          # so each ecosystem's advisory database is downloaded. Add paths for
+          # lockfiles that live in subdirectories.
+          args=()
+          for name in package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml bun.lock poetry.lock Pipfile.lock requirements.txt uv.lock pdm.lock; do
+            [ -f "$GITHUB_WORKSPACE/$name" ] && args+=(--lockfile "$GITHUB_WORKSPACE/$name")
+          done
+          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            npm run setup -- --skip-db   # scanners and database restored from this week's cache
+          else
+            npm run setup -- "${args[@]}"
+          fi
+
+      - name: Scan
+        id: scan
+        env:
+          GUARDIA_OSV_SCANNER_BIN: ${{ github.workspace }}/.dmsecurity/.guardia/tools/osv-scanner
+          GUARDIA_GITLEAKS_BIN: ${{ github.workspace }}/.dmsecurity/.guardia/tools/gitleaks
+          OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY: ${{ github.workspace }}/.dmsecurity/.guardia/osv-db
+        run: |
+          set +e
+          node .dmsecurity/dist/cli/index.js scan \
+            --repo "$GITHUB_WORKSPACE" --ref "$GITHUB_SHA" --out "$RUNNER_TEMP/report.json" | tee "$RUNNER_TEMP/summary.txt"
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmsecurity-report
+          path: ${{ runner.temp }}/report.json
+          retention-days: 14
+
+      - name: Open or update the alert issue
+        if: steps.scan.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="$(sed -n 's/^guardia: \([A-Z]*\).*/\1/p' "$RUNNER_TEMP/summary.txt")"
+          title="DMsecurity: $status on ${GITHUB_REF_NAME}"
+          body="$(printf '```\n%s\n```\nRun: %s/%s/actions/runs/%s' "$(cat "$RUNNER_TEMP/summary.txt")" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          gh label create dmsecurity --description "Opened by the DMsecurity scheduled scan" --color D93F0B 2>/dev/null || true
+          existing="$(gh issue list --label dmsecurity --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+            gh issue edit "$existing" --title "$title"
+          else
+            gh issue create --label dmsecurity --title "$title" --body "$body"
+          fi
+
+      - name: Fail the run when the scan did not pass
+        if: steps.scan.outputs.code != '0'
+        run: exit ${{ steps.scan.outputs.code }}

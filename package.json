@@ -1,7 +1,7 @@
 {
-  "name": "guardia-offline",
+  "name": "dmsecurity",
   "version": "0.1.0",
-  "description": "Local, deterministic and verifiable review of code changes and dependencies, built on existing open source scanners.",
+  "description": "DMsecurity: offline, deterministic and verifiable scan of a Git commit for vulnerable dependencies and leaked secrets, built on OSV-Scanner and Gitleaks.",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -15,7 +15,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx 'tests/**/*.test.ts'",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "setup": "bash scripts/setup.sh",
+    "scan": "GUARDIA_OSV_SCANNER_BIN=$PWD/.guardia/tools/osv-scanner GUARDIA_GITLEAKS_BIN=$PWD/.guardia/tools/gitleaks OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=$PWD/.guardia/osv-db node dist/cli/index.js scan",
+    "scan:scheduled": "bash scripts/scheduled-scan.sh"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
