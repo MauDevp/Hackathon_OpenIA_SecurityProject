@@ -58,11 +58,13 @@ test("[simulation] a redacted finding keeps rule, file and line and drops the se
   assert.equal(argv[1], snapshot);
   assert.ok(argv.includes("--config"));
   assert.ok(argv[argv.indexOf("--config") + 1]?.endsWith("rules/gitleaks/guardia.toml"));
-  for (const flag of ["--report-format", "--report-path", "--redact", "--no-banner", "--no-color", "--exit-code"]) {
+  for (const flag of ["--report-format", "--report-path", "--redact", "--no-banner", "--no-color", "--exit-code", "--ignore-gitleaks-allow", "--gitleaks-ignore-path"]) {
     assert.ok(argv.includes(flag), `missing ${flag}`);
   }
   assert.equal(argv[argv.indexOf("--exit-code") + 1], "0");
   assert.ok(!argv[argv.indexOf("--report-path") + 1]?.startsWith(snapshot), "report must be written outside the snapshot");
+  const ignorePath = argv[argv.indexOf("--gitleaks-ignore-path") + 1] ?? "";
+  assert.ok(ignorePath !== "." && !ignorePath.startsWith(snapshot), "ignore file must not come from cwd or the snapshot");
 });
 
 test("[simulation] exit 1 is an execution error, never findings or a clean result", async () => {
@@ -142,4 +144,19 @@ test("[simulation] report entry pointing outside the snapshot is dropped and not
   assert.equal(r.status, "ok");
   assert.deepEqual(r.findings, []);
   assert.ok(r.omitted.some((o) => o.includes("outside the snapshot")));
+});
+
+test("[simulation] a root .gitleaksignore keeps findings but downgrades the status to error", async () => {
+  await writeFile(join(snapshot, ".gitleaksignore"), "whatever:github-pat:4\n");
+  try {
+    await fake.setScenario({ version: "8.30.1", report: report(snapshot), exitCode: 0 });
+    const r = await scanGitleaks({ snapshotDir: snapshot, lockfiles: [] }, { env: env() });
+    assert.equal(r.status, "error");
+    assert.equal(r.findings.length, 1);
+    assert.ok(r.omitted.some((o) => o.includes(".gitleaksignore")));
+    const argv = (await fake.argv()) ?? [];
+    assert.ok(argv.includes("--ignore-gitleaks-allow"));
+  } finally {
+    await rm(join(snapshot, ".gitleaksignore"));
+  }
 });

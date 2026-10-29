@@ -1,4 +1,4 @@
-import { lstat, readdir, realpath, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** A validated snapshot root. `realRoot` is used for escape checks only. */
@@ -35,22 +35,22 @@ export type InsideCheck =
 
 /**
  * Resolve a snapshot-relative file path and refuse anything that leaves the
- * snapshot, whether through `..`, an absolute path or a symlink.
+ * snapshot, whether through `..`, an absolute path or a symlink in any
+ * component of the path (the whole path is resolved with realpath).
  */
 export async function resolveInside(snapshot: Snapshot, rel: string): Promise<InsideCheck> {
   if (typeof rel !== "string" || rel === "" || isAbsolute(rel)) return { ok: false, reason: "escapes-snapshot" };
   const absolute = resolve(snapshot.root, rel);
   if (!isInside(snapshot.root, absolute)) return { ok: false, reason: "escapes-snapshot" };
+  let real: string;
   try {
-    const info = await lstat(absolute);
-    if (info.isSymbolicLink()) {
-      const target = await realpath(absolute);
-      if (!isInside(snapshot.realRoot, target)) return { ok: false, reason: "escapes-snapshot" };
-      const targetInfo = await stat(target);
-      if (!targetInfo.isFile()) return { ok: false, reason: "not-a-file" };
-    } else if (!info.isFile()) {
-      return { ok: false, reason: "not-a-file" };
-    }
+    real = await realpath(absolute);
+  } catch {
+    return { ok: false, reason: "not-found" };
+  }
+  if (!isInside(snapshot.realRoot, real)) return { ok: false, reason: "escapes-snapshot" };
+  try {
+    if (!(await stat(real)).isFile()) return { ok: false, reason: "not-a-file" };
   } catch {
     return { ok: false, reason: "not-found" };
   }

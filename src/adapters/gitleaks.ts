@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Finding, ScanInput, ScannerResult } from "./contracts.ts";
@@ -22,6 +22,7 @@ const PACKAGE_ROOT = resolve(import.meta.dirname, "..", "..");
 export const DEFAULT_GITLEAKS_CONFIG = resolve(PACKAGE_ROOT, GITLEAKS_CONFIG_PATH);
 
 const TARGET_CONFIG_NAME = ".gitleaks.toml";
+const TARGET_IGNORE_NAME = ".gitleaksignore";
 
 export async function scanGitleaks(input: ScanInput, options: GitleaksOptions = {}): Promise<ScannerResult> {
   const result = emptyResult("gitleaks");
@@ -40,8 +41,15 @@ export async function scanGitleaks(input: ScanInput, options: GitleaksOptions = 
 
   const listing = await walkSnapshot(snapshot);
   for (const link of listing.symlinks) result.omitted.push(`${link}: symlink not followed`);
+  // Gitleaks 8.30.1 always loads <target>/.gitleaksignore in addition to the
+  // path given with --gitleaks-ignore-path, so a root ignore file cannot be
+  // neutralized from the command line. The scan still runs and its findings
+  // are kept, but coverage is then controlled by the repository: status error.
+  const rootIgnoreFile = listing.files.includes(TARGET_IGNORE_NAME);
   for (const file of listing.files) {
     if (basename(file) === TARGET_CONFIG_NAME) result.omitted.push(`${file}: repository Gitleaks configuration ignored, team configuration used instead`);
+    else if (file === TARGET_IGNORE_NAME) result.omitted.push(`${file}: repository .gitleaksignore is honored by Gitleaks and cannot be disabled; coverage not trusted`);
+    else if (basename(file) === TARGET_IGNORE_NAME) result.omitted.push(`${file}: nested .gitleaksignore (not loaded by Gitleaks, listed for transparency)`);
   }
 
   const probe = await probeTool("gitleaks", runOptions);
@@ -60,10 +68,14 @@ export async function scanGitleaks(input: ScanInput, options: GitleaksOptions = 
   const note = versionNote("gitleaks", probe.version);
   if (note) result.omitted.push(note);
 
-  // The report is written in a private temporary directory, never inside the snapshot.
+  // The report is written in a private temporary directory, never inside the
+  // snapshot. The same directory holds an empty .gitleaksignore so that the
+  // current directory's ignore file (the flag's default) is never honored.
   const reportDir = await mkdtemp(join(tmpdir(), "guardia-gitleaks-"));
   const reportPath = join(reportDir, "report.json");
+  const emptyIgnorePath = join(reportDir, TARGET_IGNORE_NAME);
   try {
+    await writeFile(emptyIgnorePath, "", "utf8");
     const outcome = await runTool(
       "gitleaks",
       [
@@ -75,6 +87,9 @@ export async function scanGitleaks(input: ScanInput, options: GitleaksOptions = 
         "--no-banner",
         "--no-color",
         "--exit-code", "0",
+        // Repository-controlled suppressions are not trusted (observed on 8.30.1).
+        "--ignore-gitleaks-allow",
+        "--gitleaks-ignore-path", emptyIgnorePath,
       ],
       runOptions,
     );
@@ -126,6 +141,10 @@ export async function scanGitleaks(input: ScanInput, options: GitleaksOptions = 
       result.findings.push(finding);
     }
     result.filesAnalyzed = listing.files;
+    if (rootIgnoreFile) {
+      result.status = "error";
+      result.error = "snapshot contains a root .gitleaksignore that Gitleaks honors; remove it from the snapshot to trust this scan";
+    }
     return result;
   } finally {
     await rm(reportDir, { recursive: true, force: true });

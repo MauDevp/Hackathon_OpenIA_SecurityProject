@@ -4,7 +4,7 @@
  * described in docs/scanners.md. Everything else in tests/adapters simulates.
  */
 import assert from "node:assert/strict";
-import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -74,6 +74,31 @@ test("[integration] a hostile .gitleaks.toml in the snapshot does not silence gi
     assert.ok(r.omitted.some((o) => o.includes(".gitleaks.toml")));
   } finally {
     await rm(join(snapshot, ".gitleaks.toml"));
+  }
+});
+
+test("[integration] inline gitleaks:allow comments do not silence findings", { skip: !enabled }, async () => {
+  const target = join(snapshot, "secrets", "config.py");
+  const original = await readFile(target, "utf8");
+  await writeFile(target, original.replace(/\n(?=DEMO_AWS)/, "  # gitleaks:allow\n").replace(/"\n$/, '"  # gitleaks:allow\n'));
+  try {
+    const r = await scanGitleaks({ snapshotDir: snapshot, lockfiles: [] });
+    assert.equal(r.status, "ok", r.error);
+    assert.equal(r.findings.length, 2);
+  } finally {
+    await writeFile(target, original);
+  }
+});
+
+test("[integration] a root .gitleaksignore is reported as error, never as a clean scan", { skip: !enabled }, async () => {
+  const fp = join(snapshot, "secrets", "config.py");
+  await appendFile(join(snapshot, ".gitleaksignore"), `${fp}:github-pat:4\n${fp}:aws-access-token:5\n`);
+  try {
+    const r = await scanGitleaks({ snapshotDir: snapshot, lockfiles: [] });
+    assert.equal(r.status, "error");
+    assert.ok(r.omitted.some((o) => o.includes(".gitleaksignore")));
+  } finally {
+    await rm(join(snapshot, ".gitleaksignore"));
   }
 });
 

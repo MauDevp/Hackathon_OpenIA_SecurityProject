@@ -201,9 +201,9 @@ export function parseFindings(stdout: string, lockfileRel: string): Finding[] | 
   if (!isRecord(parsed) || !Array.isArray(parsed["results"])) return null;
   const findings: Finding[] = [];
   for (const entry of parsed["results"]) {
-    if (!isRecord(entry) || !Array.isArray(entry["packages"])) continue;
+    if (!isRecord(entry) || !Array.isArray(entry["packages"])) return null;
     for (const pkg of entry["packages"]) {
-      if (!isRecord(pkg)) continue;
+      if (!isRecord(pkg)) return null;
       const info = isRecord(pkg["package"]) ? pkg["package"] : {};
       const name = typeof info["name"] === "string" ? info["name"] : "unknown";
       const version = typeof info["version"] === "string" ? info["version"] : "unknown";

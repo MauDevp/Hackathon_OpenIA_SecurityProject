@@ -131,13 +131,24 @@ test("[simulation] unsupported lockfile name is omitted and never passed to the 
 });
 
 test("lockfile escaping the snapshot is rejected before execution", async () => {
-  await fake.setScenario({ version: "osv-scanner version: 2.7.0", stdout: "SHOULD-NOT-RUN", exitCode: 0 });
-  const r = await scanOsv({ snapshotDir: snapshot, lockfiles: ["../package-lock.json", "/etc/package-lock.json"] }, { env: env() });
-  assert.equal(r.status, "error");
-  assert.deepEqual(r.filesAnalyzed, []);
-  assert.equal(r.omitted.length, 2);
-  const argv = await fake.argv();
-  assert.ok(!(argv ?? []).some((a) => a.includes("/etc/") || a.includes("..")));
+  // Nest the snapshot so the traversal target really exists one level up.
+  const base = await mkdtemp(join(tmpdir(), "guardia-base-"));
+  const nested = join(base, "snap");
+  await mkdir(nested);
+  await writeFile(join(nested, "package-lock.json"), "{}");
+  await writeFile(join(base, "package-lock.json"), "{}");
+  try {
+    await fake.setScenario({ version: "osv-scanner version: 2.7.0", stdout: "SHOULD-NOT-RUN", exitCode: 0 });
+    const r = await scanOsv({ snapshotDir: nested, lockfiles: ["../package-lock.json", "/etc/package-lock.json"] }, { env: env() });
+    assert.equal(r.status, "error");
+    assert.deepEqual(r.filesAnalyzed, []);
+    assert.equal(r.omitted.length, 2);
+    const argv = (await fake.argv()) ?? [];
+    assert.ok(!argv.includes("-L"), "scan must not have run");
+    assert.ok(!argv.some((a) => a === join(base, "package-lock.json") || a.includes("/etc/")));
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test("[simulation] version mismatch is recorded in omitted but does not fail the scan", async () => {

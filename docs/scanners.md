@@ -168,6 +168,19 @@ Consequences for the adapter:
   and walks it itself to produce `filesAnalyzed`.
 - Case 7: Gitleaks 8.30.1 does **not** follow symlinks. Symlinked files and
   directories are not scanned; the adapter lists them under `omitted`.
+- Observed after the first round, with the real binary: `# gitleaks:allow`
+  comments in analyzed files silence findings even with an explicit
+  `--config`; the adapter passes `--ignore-gitleaks-allow`, which restores
+  them (verified). A `.gitleaksignore` at the snapshot root with absolute-path
+  fingerprints also silences findings, and `--gitleaks-ignore-path` does
+  **not** prevent it: Gitleaks loads `<target>/.gitleaksignore` in addition to
+  the given path (tried an empty file, an empty directory and a nonexistent
+  path; all still 0 findings). The flag's default is the current directory, so
+  the adapter points it at an empty file in its temporary directory. When the
+  snapshot root contains `.gitleaksignore`, the adapter still runs, keeps any
+  findings, and returns `status: "error"` because coverage is then controlled
+  by the repository. The clean fix belongs to the core: exclude
+  `.gitleaksignore` when materializing the snapshot (open question, section 7).
 - With `--exit-code 0`, exit `1` can only mean an execution error. Findings are
   read from the report file, written in a private temporary directory outside
   the snapshot.
@@ -201,11 +214,18 @@ kernel-level or namespace-level isolation was applied and no syscall trace was
 captured. The core must therefore report network isolation as **not
 verified** and return `INCOMPLETE` when strict isolation is requested.
 
+Path checks and tool execution are separate steps: the adapters resolve every
+lockfile with `realpath` before running, but a snapshot that is modified
+concurrently could still swap a file for a symlink in between. The snapshot
+must be immutable while a scan runs.
+
 ## 7. Open questions for the team
 
 - Whether `snapshotDir` arrives without symlinks that escape it. The adapter
   rejects lockfiles that resolve outside the snapshot and lists symlinks as
   omitted, but the cleanest fix is a snapshot without symlinks.
+- The snapshot step should drop `.gitleaksignore` from the copy; Gitleaks
+  honors it and the adapter can only report it (section 4).
 - Only the npm database was downloaded. PyPI lockfiles will report `missing`
   until `osv-scalibr/PyPI/all.zip` is downloaded the same way.
 

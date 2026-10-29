@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, before, test } from "node:test";
 import { scanGitleaks } from "../../src/adapters/gitleaks.ts";
-import { scanOsv } from "../../src/adapters/osv.ts";
+import { parseFindings, scanOsv } from "../../src/adapters/osv.ts";
 import { OSV_DB_ENV, TOOLS } from "../../src/adapters/tools.ts";
 import { createFakeTool, type FakeTool } from "./helpers/fake-tool.ts";
 
@@ -23,6 +23,9 @@ before(async () => {
   await writeFile(join(snapshot, "deep dir", "x y", "package-lock.json"), "{}");
   await writeFile(join(outside, "package-lock.json"), "{}");
   await symlink(join(outside, "package-lock.json"), join(snapshot, "yarn.lock"));
+  await mkdir(join(outside, "deeper"));
+  await writeFile(join(outside, "deeper", "package-lock.json"), "{}");
+  await symlink(outside, join(snapshot, "linkdir"));
   await mkdir(join(snapshot, "pnpm-lock.yaml"));
   await mkdir(join(snapshot, "nested"));
   await writeFile(join(snapshot, "nested", ".gitleaks.toml"), "[allowlist]\npaths = ['''.*''']\n");
@@ -67,13 +70,37 @@ test("a lockfile path that is a directory is rejected", async () => {
   assert.ok(r.omitted.some((o) => o.includes("not-a-file")));
 });
 
-test("lockfile paths with NUL bytes or traversal segments never reach the tool", async () => {
+test("a lockfile reached through a symlinked directory is rejected before execution", async () => {
   await osv.setScenario({ version: "osv-scanner version: 2.7.0", stdout: "MUST-NOT-RUN", exitCode: 0 });
-  const r = await scanOsv({ snapshotDir: snapshot, lockfiles: ["deep dir/../../package-lock.json", "a\u0000package-lock.json"] }, { env: env() });
+  const r = await scanOsv({ snapshotDir: snapshot, lockfiles: ["linkdir/deeper/package-lock.json"] }, { env: env() });
   assert.equal(r.status, "error");
   assert.deepEqual(r.filesAnalyzed, []);
+  assert.ok(r.omitted.some((o) => o.includes("linkdir/deeper/package-lock.json") && o.includes("escapes-snapshot")));
   const argv = (await osv.argv()) ?? [];
-  assert.ok(!argv.includes("-L"));
+  assert.ok(!argv.includes("-L"), "scan must not have been invoked");
+});
+
+test("lockfile paths with NUL bytes or traversal segments never reach the tool", async () => {
+  // The traversal target exists: snapshot/../<name> is a real file next to the snapshot.
+  const sibling = join(snapshot, "..", `${basename(snapshot)}-sibling-package-lock.json`);
+  await writeFile(sibling, "{}");
+  try {
+    await osv.setScenario({ version: "osv-scanner version: 2.7.0", stdout: "MUST-NOT-RUN", exitCode: 0 });
+    const r = await scanOsv({ snapshotDir: snapshot, lockfiles: [`deep dir/../../${basename(sibling)}`, "a\u0000package-lock.json"] }, { env: env() });
+    assert.equal(r.status, "error");
+    assert.deepEqual(r.filesAnalyzed, []);
+    const argv = (await osv.argv()) ?? [];
+    assert.ok(!argv.includes("-L"));
+    assert.ok(!argv.some((a) => a.endsWith(basename(sibling))));
+  } finally {
+    await rm(sibling, { force: true });
+  }
+});
+
+test("malformed OSV JSON with the right top-level key is an error, not a clean result", async () => {
+  assert.equal(parseFindings('{"results":[{"foo":1}]}', "package-lock.json"), null);
+  assert.equal(parseFindings('{"results":[{"packages":[1]}]}', "package-lock.json"), null);
+  assert.deepEqual(parseFindings('{"results":[]}', "package-lock.json"), []);
 });
 
 test("[simulation] snapshot path with trailing slash and spaces works for gitleaks", async () => {
