@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Local analysis state and caches
+.guardia/
+*.sarif
+!fixtures/**/*.sarif
+!schemas/**/*.sarif
+
+# Offline advisory databases (downloaded, never committed)
+osv-db/
+
+# Environment and secrets
+.env
+.env.*
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Logs
+*.log

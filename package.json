@@ -1,0 +1,38 @@
+{
+  "name": "guardia-offline",
+  "version": "0.0.0",
+  "description": "Local, deterministic and verifiable review of code changes and dependencies, built on existing open source scanners.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "guardia": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx tests/",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject.git"
+  },
+  "keywords": [
+    "security",
+    "sca",
+    "sast",
+    "offline",
+    "osv",
+    "sarif",
+    "git"
+  ]
+}

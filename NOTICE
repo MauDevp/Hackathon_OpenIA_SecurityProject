@@ -1,0 +1,9 @@
+Guardia Offline
+Copyright 2026 Mauricio Silva
+
+This product includes software developed as part of the Guardia Offline
+project (https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject).
+
+Third-party scanners and databases (OpenQodex, OSV-Scanner, Gitleaks,
+Semgrep CE, Git) are distributed under their own licenses and are not
+included in this repository. See THIRD_PARTY_NOTICES in each release.
