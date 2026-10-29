@@ -117,6 +117,9 @@ Consequences for the adapter:
 - The database file for the lockfile's ecosystem is checked before running.
   Absent database → `missing` without executing the tool.
 - `lodash@4.17.21` is no longer clean (B), so the clean fixture is `ms@2.1.3`.
+- Cost of the per-lockfile design: each run loads the 219 MB npm database;
+  on the test machine one lockfile took about 14 s. Acceptable for a handful
+  of lockfiles; batch runs would need a different trade-off.
 
 Confirmed JSON shape (case A): top-level `results[]` and `experimental_config`;
 `results[].source.{path,type}` with `type: "lockfile"`;
@@ -205,3 +208,42 @@ verified** and return `INCOMPLETE` when strict isolation is requested.
   omitted, but the cleanest fix is a snapshot without symlinks.
 - Only the npm database was downloaded. PyPI lockfiles will report `missing`
   until `osv-scalibr/PyPI/all.zip` is downloaded the same way.
+
+## 8. Integration notes for the core
+
+```ts
+import { scanAll } from "./adapters/index.ts";
+
+const results = await scanAll({ snapshotDir, lockfiles });
+// results[0].scanner === "osv", results[1].scanner === "gitleaks", always both.
+```
+
+- `snapshotDir` must be absolute and exist; `lockfiles` are relative to it.
+  Anything escaping the snapshot (`..`, absolute paths, symlinks) is rejected
+  before any process starts and reported under `omitted` with `status: "error"`.
+- Environment: `GUARDIA_OSV_SCANNER_BIN` / `GUARDIA_GITLEAKS_BIN` (absolute
+  paths) or the tools on `PATH`; `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY`
+  (default `.guardia/osv-db` relative to `process.cwd()`). `createScanAll({ env, cwd, timeoutMs })`
+  lets the CLI pass an explicit environment instead of `process.env`.
+- Status mapping for the report: any `missing` or `error` → `INCOMPLETE`;
+  `unsupported` means the scanner had nothing it could analyze (for example no
+  lockfiles) and should also be surfaced, since both scanners are required;
+  findings present with both scanners `ok` → `FINDINGS`; otherwise `PASS`.
+- `omitted` lists, per scanner, what was not analyzed and why: symlinks,
+  ignored repository configuration, unsupported lockfiles, version mismatch.
+  It is the coverage statement; print it.
+- Network isolation is **not verified** by the adapters (section 6). Strict
+  mode must report `INCOMPLETE`.
+
+### Running the tests
+
+```bash
+node --test 'tests/adapters/**/*.test.ts'                      # simulations, no binaries needed
+GUARDIA_INTEGRATION=1 PATH="$PWD/.guardia/tools:$PATH" \
+OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/.guardia/osv-db" \
+  node --test tests/adapters/integration.test.ts               # real binaries and database
+```
+
+Tests whose name starts with `[simulation]` use fake executables and prove how
+the adapters react to a given tool output, not that the tool produces it.
+Tests named `[integration]` ran against the pinned binaries on 2026-10-29.

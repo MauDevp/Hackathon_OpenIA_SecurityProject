@@ -58,6 +58,8 @@ src/adapters/
   contracts.ts        copia temporal del contrato (ver decisión 6)
   tools.ts            versiones fijadas, nombres de binarios, variables de entorno
   runner.ts           ejecutor sin shell: timeout, tope de salida, env mínimo, errores tipados
+  paths.ts            validación del snapshot y de rutas (sin seguir symlinks)
+  shared.ts           utilidades comunes: sonda de versión, mensajes fijos de fallo
   osv.ts              adaptador OSV-Scanner → ScannerResult
   gitleaks.ts         adaptador Gitleaks → ScannerResult (redacción)
   index.ts            scanAll: ScanAll
