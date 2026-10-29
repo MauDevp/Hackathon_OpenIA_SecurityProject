@@ -153,14 +153,9 @@ export function runTool(
   });
 }
 
-/**
- * Ask a tool for its version. Returns the first stdout line, or null when the
- * tool is absent or misbehaves. Never throws.
- */
-export async function readVersion(tool: ScannerName, options: RunOptions = {}): Promise<string | null> {
-  const outcome = await runTool(tool, TOOLS[tool].versionArgs, { ...options, timeoutMs: 15_000 });
-  if (outcome.kind !== "completed" || outcome.exitCode !== 0) return null;
-  const firstLine = outcome.stdout.split(/\r?\n/, 1)[0] ?? "";
+/** Extract `MAJOR.MINOR.PATCH` from the first line of a version banner. */
+export function parseVersion(stdout: string): string | null {
+  const firstLine = stdout.split(/\r?\n/, 1)[0] ?? "";
   const match = /(\d+\.\d+\.\d+)/.exec(firstLine);
   return match?.[1] ?? null;
 }
