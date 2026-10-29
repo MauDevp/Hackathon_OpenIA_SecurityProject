@@ -7,5 +7,6 @@ Decides the final state of an analysis from normalized findings and coverage:
 - `INCOMPLETE`: missing scanner or database, isolation not verifiable,
   timeout, unknown schema or unsupported scope.
 
-Policy lives outside the analyzed repository. Suppressions record owner,
-reason, scope and expiration, and are always shown in the report.
+For v1 this logic lives in `src/core/orchestrator.ts` to keep the state
+decision next to snapshot coverage. This folder remains reserved for a future
+versioned policy with suppressions; it has no active implementation yet.
