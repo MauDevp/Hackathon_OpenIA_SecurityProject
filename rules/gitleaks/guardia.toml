@@ -1,0 +1,4 @@
+title = "Guardia baseline secret rules"
+
+[extend]
+useDefault = true

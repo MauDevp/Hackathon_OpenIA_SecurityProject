@@ -4,8 +4,8 @@
   (Markdown and original PDF). Start with
   [investigacion-seguridad-ia-opensource.md](research/investigacion-seguridad-ia-opensource.md).
 
-Planned documents:
-
-- `threat-model.md`: threats to the analyzed repository and to the tool itself.
-- `architecture.md`: components, inputs, outputs and failure states.
-- `install.md`: pinned installation and first offline analysis.
+- [architecture.md](architecture.md): flujo, límites y estados de salida.
+- [scanners.md](scanners.md): ejecución local, metadatos y límites de los
+  escáneres.
+- [decisiones.md](decisiones.md): decisión de adaptación separada de
+  OpenQodex.
