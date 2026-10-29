@@ -1,0 +1,11 @@
+# Guardia team configuration for Gitleaks.
+#
+# This file is passed explicitly with `--config` on every run so that a
+# `.gitleaks.toml` inside the analyzed snapshot is never honored. It extends
+# the default rule set shipped with the pinned Gitleaks version and adds no
+# allowlists: the analyzed repository must not be able to silence findings.
+
+title = "Guardia Offline - Gitleaks configuration"
+
+[extend]
+useDefault = true
