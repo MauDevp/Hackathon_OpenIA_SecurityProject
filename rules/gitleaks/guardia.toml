@@ -5,7 +5,7 @@
 # the default rule set shipped with the pinned Gitleaks version and adds no
 # allowlists: the analyzed repository must not be able to silence findings.
 
-title = "Guardia Offline - Gitleaks configuration"
+title = "DMsecurity - Gitleaks configuration for guardia"
 
 [extend]
 useDefault = true

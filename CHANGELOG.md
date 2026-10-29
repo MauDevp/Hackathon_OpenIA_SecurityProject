@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Project renamed to DMsecurity. The `guardia` command, environment variables
+  and `.guardia/` directory keep their names.
+
+### Added
+
+- `npm run setup` (`scripts/setup.sh`): installs the pinned scanners with
+  SHA-256 verification and downloads the OSV offline database in one step.
+- `npm run scan`: runs `guardia scan` with the environment pointed at the
+  local scanners and database.
+- `scripts/scheduled-scan.sh`: cron-friendly scan with report history and a
+  desktop notification on `FINDINGS` or `INCOMPLETE`.
+- `examples/scheduled-scan.yml`: scheduled GitHub Actions workflow that opens
+  or updates an issue when the result is not `PASS`.
+
 ## [0.1.0] - 2026-10-29
 
 First usable prototype of the local scan workflow.

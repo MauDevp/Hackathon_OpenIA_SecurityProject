@@ -1,24 +1,41 @@
 <div align="center">
 
-# 🛡️ Guardia Offline
+# 🛡️ DMsecurity
 
-**Local, deterministic and verifiable security review of a Git commit.**
-No LLM, no cloud, no credentials. Just the scanners, an offline advisory database, and a report that says exactly what was checked and what was not.
+### Know exactly what was checked before you trust a green light.
 
+**DMsecurity scans a Git commit for known-vulnerable dependencies and leaked secrets, fully offline, and tells you precisely what it covered and what it could not.**
+
+[![CI](https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/actions/workflows/ci.yml/badge.svg)](https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js ≥ 22](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](.nvmrc)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
 [![OSV-Scanner 2.7.0](https://img.shields.io/badge/OSV--Scanner-2.7.0-4285F4?logo=google&logoColor=white)](docs/scanners.md)
 [![Gitleaks 8.30.1](https://img.shields.io/badge/Gitleaks-8.30.1-000000?logo=git&logoColor=white)](docs/scanners.md)
-[![CI](https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/actions/workflows/ci.yml/badge.svg)](https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/actions/workflows/ci.yml)
 [![Status: prototype](https://img.shields.io/badge/status-prototype-orange.svg)](#roadmap)
 
 </div>
 
 ---
 
+## What is DMsecurity?
+
+Most security scanners give you a list of problems. Very few tell you what they **did not** look at. DMsecurity was built around that gap.
+
+It takes one Git commit, copies it into a private snapshot, runs two proven open source scanners against it, and produces a single verdict with an honest coverage statement:
+
+| Verdict | Exit code | What it really means |
+| :--- | :---: | :--- |
+| ✅ `PASS` | `0` | Every scanner ran on the whole snapshot and reported nothing. **Not** "secure", only "nothing found with these tools and this data". |
+| 🔴 `FINDINGS` | `1` | At least one known vulnerability or leaked secret. Each one is listed in the report. |
+| ⚠️ `INCOMPLETE` | `2` | A scanner, a database or part of the snapshot was missing. DMsecurity refuses to turn missing coverage into a green light. |
+
+> **The one rule:** missing coverage always wins over findings. A scan that could not check everything is never `PASS`.
+
+Everything runs on your machine. No LLM, no cloud, no credentials, no network once the advisory database is downloaded. The report records the commit hash, the scanner versions, the database checksum and every file it skipped, so a human, a Git hook or a CI job can verify the claim instead of trusting it.
+
 ```text
-$ guardia scan --repo ~/code/my-app --ref HEAD --out /tmp/my-app-report.json
+$ npm run scan -- --repo ~/code/my-app --ref HEAD --out /tmp/my-app-report.json
 
 guardia: FINDINGS (exit 1)
 commit: cefa3873b9250f27d5eed940a468c5dd737893ea
@@ -29,48 +46,24 @@ gitleaks: ok (8.30.1)
 report: /tmp/my-app-report.json
 ```
 
-Three possible outcomes, and only three:
-
-| Result | Exit code | Meaning |
-| :--- | :---: | :--- |
-| ✅ `PASS` | `0` | Every required scanner ran on the full snapshot and reported nothing. **Not** "secure", only "nothing found with these tools and this data". |
-| 🔴 `FINDINGS` | `1` | At least one vulnerability or secret was reported. The report lists each one. |
-| ⚠️ `INCOMPLETE` | `2` | A scanner, a database or part of the snapshot was missing. Guardia refuses to turn missing coverage into a green light. |
-
-> **Design rule:** missing coverage always wins over findings. A scan that could not check everything is never `PASS`.
+The command-line tool is called `guardia`, the project's original name. It stays that way so existing scripts keep working.
 
 ---
 
-## Table of contents
+## Why it exists
 
-- [Why](#why)
-- [How it works](#how-it-works)
-- [Quick start](#quick-start)
-- [Usage](#usage)
-- [The report](#the-report)
-- [Configuration](#configuration)
-- [Running the tests](#running-the-tests)
-- [Repository layout](#repository-layout)
-- [Limits you should know](#limits-you-should-know)
-- [Roadmap](#roadmap)
-- [Documentation](#documentation)
-- [Contributing and license](#contributing-and-license)
-
----
-
-## Why
-
-Teams using AI coding assistants on private repositories often cannot, or do not want to, send their code to a remote scanner. They still need an answer to a simple question before merging:
+Teams using AI coding assistants on private repositories often cannot, or do not want to, send their code to a remote scanner. They still need an answer before merging:
 
 > *Does this exact commit introduce a known-vulnerable dependency or a leaked secret, and can I prove what was checked?*
 
-Guardia answers that question **offline and reproducibly**:
+DMsecurity answers that offline and reproducibly:
 
-- 📌 **Immutable snapshot.** It analyzes a Git ref, not your working tree. The commit hash is in the report.
-- 🔌 **Works without network.** Scanners run in `--offline` mode against an advisory database you downloaded beforehand.
-- 🧾 **Explicit coverage.** The report lists the lockfiles analyzed, the files omitted, the scanner versions and the database checksum.
-- 🧱 **Built on proven open source.** [OSV-Scanner](https://github.com/google/osv-scanner) for dependencies, [Gitleaks](https://github.com/gitleaks/gitleaks) for secrets. Guardia orchestrates; it does not reinvent detection.
-- 🔒 **Hostile-repo safe.** Executables inside the analyzed repository are never run, repository-level Gitleaks allowlists and `.gitleaksignore` are ignored, symlinks are never materialized, and the report path must live outside the repository.
+- 📌 **Immutable snapshot.** It analyzes a Git ref, never your working tree. The commit hash is in the report.
+- 🔌 **Air-gap friendly.** Scanners run in `--offline` mode against an advisory database you downloaded beforehand.
+- 🧾 **Explicit coverage.** Lockfiles analyzed, files omitted, scanner versions and database checksum are all in the JSON.
+- 🧱 **Built on proven open source.** [OSV-Scanner](https://github.com/google/osv-scanner) for dependencies, [Gitleaks](https://github.com/gitleaks/gitleaks) for secrets. DMsecurity orchestrates; it does not reinvent detection.
+- 🔒 **Hostile-repo safe.** Executables inside the analyzed repository are never run, repository-level Gitleaks allowlists and `.gitleaksignore` are ignored, symlinks are never materialized, and the report must live outside the repository.
+- 📐 **Machine-checkable output.** The report follows a published [JSON Schema](schemas/guardia-report-1.0.schema.json) and is validated by the test suite.
 
 The full reasoning, competitive analysis and roadmap live in the [research report](docs/research/investigacion-seguridad-ia-opensource.md).
 
@@ -82,7 +75,7 @@ The full reasoning, competitive analysis and roadmap live in the [research repor
 flowchart LR
     A[git ref] --> B["Immutable snapshot<br/>(git cat-file, no checkout)"]
     B --> C["OSV-Scanner<br/>offline advisory DB"]
-    B --> D["Gitleaks<br/>Guardia team config"]
+    B --> D["Gitleaks<br/>team config"]
     C --> E{Decision}
     D --> E
     E -->|"all scanners ok · 0 findings"| P["PASS · exit 0"]
@@ -90,108 +83,73 @@ flowchart LR
     E -->|"missing scanner, DB or coverage"| I["INCOMPLETE · exit 2"]
 ```
 
-1. **Snapshot.** Guardia resolves `--ref` to a commit and copies every blob into a private temporary directory using `git cat-file`. Nothing is checked out, so your working tree is untouched. Symlinks and submodules are recorded as excluded.
-2. **Scan.** Both scanners run concurrently against the snapshot, each as a shell-free child process with a timeout, an output cap and a minimal environment allowlist. OSV-Scanner runs once per lockfile so that one bad lockfile cannot hide another.
-3. **Decide and report.** The orchestrator applies the three-state rule above, redacts anything that looks like a secret, and writes the JSON report atomically with mode `0600`.
-4. **Clean up.** The snapshot directory is always deleted, even on failure.
+1. **Snapshot.** The ref is resolved to a commit and every blob is copied into a private temporary directory with `git cat-file`. Nothing is checked out. Symlinks and submodules are recorded as excluded.
+2. **Scan.** Both scanners run concurrently as shell-free child processes with a timeout, an output cap and a minimal environment. OSV-Scanner runs once per lockfile so one bad lockfile cannot hide another.
+3. **Decide and report.** The three-state rule above is applied, anything that looks like a secret is redacted, and the JSON report is written atomically with mode `0600`.
+4. **Clean up.** The snapshot is always deleted, even on failure.
 
 ---
 
 ## Quick start
 
-Everything below is for **Linux x86_64**. Other platforms work the same way with the matching release assets from each scanner.
-
-### 1. Prerequisites
-
-| Requirement | Version | Check |
-| :--- | :--- | :--- |
-| Node.js | 22 or newer | `node --version` |
-| Git | any recent | `git --version` |
-| `curl`, `tar`, `sha256sum` | standard | shipped with most distros |
-
-### 2. Install Guardia
+Three commands on Linux x86_64. Other platforms: see [manual setup](#manual-setup) below.
 
 ```bash
-git clone https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject.git guardia-offline
-cd guardia-offline
-nvm use            # optional, picks Node 22 from .nvmrc
-npm ci
-npm run build
-node dist/cli/index.js --help
+git clone https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject.git dmsecurity
+cd dmsecurity
+npm ci && npm run build      # 1. build the CLI (Node 22+)
+npm run setup                # 2. scanners + offline advisory database, checksums verified
+npm run scan -- --repo /path/to/your/repository --ref HEAD --out /tmp/report.json   # 3. scan
 ```
 
-Optional, to get a global `guardia` command on your `PATH`:
+What `npm run setup` does, so you can trust it:
 
-```bash
-npm link
-guardia --help
-```
+- Downloads **OSV-Scanner 2.7.0** and **Gitleaks 8.30.1** from their GitHub releases into the Git-ignored folder `.guardia/tools/` and verifies each SHA-256 against the values recorded in [docs/scanners.md](docs/scanners.md). Your system stays untouched.
+- Downloads the OSV advisory database for npm (about 220 MB, once) into `.guardia/osv-db/` and writes the metadata the report uses. Need other ecosystems? Pass one lockfile per ecosystem: `npm run setup -- --lockfile /path/to/poetry.lock`.
+- Is safe to re-run. Present binaries are kept, and so is the database when you pass no `--lockfile`; `npm run setup -- --refresh-db` or an explicit `--lockfile` downloads fresh advisories.
 
-### 3. Install the scanners
+`npm run scan` is `guardia scan` with the environment already pointed at those folders. Run it from the DMsecurity directory.
 
-Guardia **does not download or bundle** the scanners. Install the pinned versions into the project-local, Git-ignored folder `.guardia/tools/`. Checksums are verified against the files published with each release.
-
-```bash
-mkdir -p .guardia/tools dl && cd dl
-
-# OSV-Scanner 2.7.0
-curl -fsSLO https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_linux_amd64
-curl -fsSLO https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_SHA256SUMS
-sha256sum --ignore-missing -c osv-scanner_SHA256SUMS
-install -m 0755 osv-scanner_linux_amd64 ../.guardia/tools/osv-scanner
-
-# Gitleaks 8.30.1
-curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-curl -fsSLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
-sha256sum --ignore-missing -c gitleaks_8.30.1_checksums.txt
-tar -xzf gitleaks_8.30.1_linux_x64.tar.gz gitleaks && install -m 0755 gitleaks ../.guardia/tools/gitleaks
-
-cd .. && rm -rf dl
-.guardia/tools/osv-scanner --version | head -1   # osv-scanner version: 2.7.0
-.guardia/tools/gitleaks version                   # 8.30.1
-```
-
-Then tell Guardia where they are. Either option works:
-
-```bash
-# Option A: environment variables (absolute paths)
-export GUARDIA_OSV_SCANNER_BIN="$PWD/.guardia/tools/osv-scanner"
-export GUARDIA_GITLEAKS_BIN="$PWD/.guardia/tools/gitleaks"
-
-# Option B: put them on the PATH
-export PATH="$PWD/.guardia/tools:$PATH"
-```
-
-Already have both tools installed system-wide? Skip this step; Guardia finds them on `PATH`. The adapters were written against the pinned versions above, so other versions may behave differently.
-
-### 4. Download the offline advisory database (once, needs network)
-
-OSV-Scanner downloads one database per ecosystem the first time it sees a lockfile for it. Point it at a lockfile of **each ecosystem you plan to scan**. The bundled fixture triggers the npm database:
-
-```bash
-OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/.guardia/osv-db" \
-  .guardia/tools/osv-scanner scan --offline --download-offline-databases \
-  -L fixtures/adapters/npm-vulnerable/package-lock.json --format json > /dev/null
-```
-
-The npm database is about 220 MB. It lands in `.guardia/osv-db/osv-scalibr/npm/all.zip`, which is the default location Guardia looks at when run from this directory. From then on, no network is required.
-
-### 5. Run your first scan
-
-```bash
-node dist/cli/index.js scan \
-  --repo /path/to/your/repository \
-  --ref HEAD \
-  --out /tmp/guardia-report.json
-```
-
-You will get the terminal summary shown at the top of this page and a JSON report at the path you chose.
-
-> 💡 Want to see `FINDINGS` right away? Scan this very repository: its `fixtures/` folder contains a deliberately vulnerable `lodash@4.17.20` lockfile and synthetic fake secrets.
+> 💡 Want to see `FINDINGS` right away? Scan this very repository: its `fixtures/` folder holds a deliberately vulnerable `lodash@4.17.20` lockfile and synthetic fake secrets.
 >
 > ```bash
-> node dist/cli/index.js scan --repo . --ref HEAD --out /tmp/guardia-self.json
+> npm run scan -- --repo . --ref HEAD --out /tmp/self-report.json
 > ```
+
+---
+
+## Automate it
+
+### On your machine: cron or a systemd timer
+
+`scripts/scheduled-scan.sh` scans one repository, keeps every report under `~/.local/state/guardia/<repo>/`, appends a line to `history.log`, and sends a **desktop notification** when the result is `FINDINGS` or `INCOMPLETE`.
+
+```bash
+# Try it once
+scripts/scheduled-scan.sh /path/to/your/repository
+
+# Every weekday at 09:00 (crontab -e). Cron has no session bus, so pass it for the desktop notification.
+0 9 * * 1-5 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus /path/to/dmsecurity/scripts/scheduled-scan.sh /path/to/repo >> ~/.local/state/guardia/cron.log 2>&1
+```
+
+Set `GUARDIA_NOTIFY=none` to silence notifications and `GUARDIA_STATE_DIR` to move the reports. Without a session bus the scan still runs and logs; only the pop-up is skipped.
+
+### In GitHub: scheduled scan that opens an issue
+
+Copy [`examples/scheduled-scan.yml`](examples/scheduled-scan.yml) into `.github/workflows/` of the repository you want to watch. Every weekday morning it scans the default branch, uploads the report as an artifact and, when the result is not `PASS`, **opens or updates one issue** labelled `dmsecurity` and fails the run. GitHub's own notifications become your alert channel: no bots, no external accounts.
+
+### As a gate in any script
+
+The exit code encodes the outcome, so DMsecurity drops into a pre-push hook or a pipeline as is:
+
+```bash
+node /path/to/dmsecurity/dist/cli/index.js scan --repo "$(git rev-parse --show-toplevel)" --ref HEAD --out /tmp/pre-push.json
+case $? in
+  0) echo "PASS" ;;
+  1) echo "FINDINGS, see /tmp/pre-push.json"; exit 1 ;;
+  *) echo "INCOMPLETE, fix the setup before trusting this result"; exit 1 ;;
+esac
+```
 
 ---
 
@@ -206,27 +164,10 @@ guardia scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline
 | `--repo <path>` | ✔ | Path to an existing Git repository. |
 | `--ref <git-ref>` | ✔ | Anything `git rev-parse` resolves to a commit: `HEAD`, a branch, a tag, a SHA. |
 | `--out <file>` | ✔ | Where to write the JSON report. **Must be outside the repository.** Written atomically with mode `0600`. |
-| `--strict-offline` | | Fail closed unless network isolation is *verified*. No verification mechanism exists yet, so this flag currently always yields `INCOMPLETE`. See [Limits](#limits-you-should-know). |
+| `--strict-offline` | | Fail closed unless network isolation is *verified*. No verification mechanism exists yet, so this flag always yields `INCOMPLETE`. See [Limits](#limits-you-should-know). |
 | `--help`, `-h` | | Print usage. |
 
-Usage errors (unknown flag, missing value, `--out` inside the repo) print a one-line message and exit with code `2`. A ref that does not resolve is not a usage error: Guardia still writes an `INCOMPLETE` report and exits `2`.
-
-### Use it as a gate
-
-Because the exit code encodes the outcome, Guardia drops into any script:
-
-```bash
-#!/usr/bin/env bash
-# .git/hooks/pre-push (example)
-set -u
-node /path/to/guardia-offline/dist/cli/index.js scan \
-  --repo "$(git rev-parse --show-toplevel)" --ref HEAD --out /tmp/guardia-pre-push.json
-case $? in
-  0) echo "guardia: PASS" ;;
-  1) echo "guardia: FINDINGS, see /tmp/guardia-pre-push.json"; exit 1 ;;
-  *) echo "guardia: INCOMPLETE, fix the setup before trusting this result"; exit 1 ;;
-esac
-```
+Usage errors (unknown flag, missing value, `--out` inside the repo) print a one-line message and exit with code `2`. A ref that does not resolve is not a usage error: DMsecurity still writes an `INCOMPLETE` report and exits `2`.
 
 ---
 
@@ -244,7 +185,7 @@ esac
 | `filesAnalyzed` | Union of the files every scanner confirmed as fully reviewed. |
 | `omitted` | Files detected but not analyzed, each as `<scanner>: <path>: <reason>`. |
 | `scanners[]` | One entry per scanner: `scanner`, `status` (`ok` \| `missing` \| `unsupported` \| `error`), `version`, and for OSV the `database` `{ downloadedAt, sourceDate, sha256 }`. |
-| `findings[]` | `{ scanner, type, id, path, line?, summary }`. `type` is `dependency` or `secret`. Secrets are redacted twice: by Gitleaks and by Guardia. |
+| `findings[]` | `{ scanner, type, id, path, line?, summary }`. `type` is `dependency` or `secret`. Secrets are redacted twice: by Gitleaks and by DMsecurity. |
 
 Example finding:
 
@@ -258,26 +199,53 @@ Example finding:
 }
 ```
 
-Detected lockfile names: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `poetry.lock`, `Pipfile.lock`, `requirements.txt`, `uv.lock`, `pdm.lock`. Whether OSV-Scanner can parse each one depends on the scanner; unsupported files are reported as `omitted`, never silently skipped.
+Detected lockfile names: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `poetry.lock`, `Pipfile.lock`, `requirements.txt`, `uv.lock`, `pdm.lock`. Files the scanner cannot parse are reported as `omitted`, never silently skipped.
 
 ---
 
 ## Configuration
 
-Guardia has no config file. Everything is an environment variable:
+No config file. Everything is an environment variable, and `npm run scan` sets the first three for you:
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `GUARDIA_OSV_SCANNER_BIN` | search `PATH` | Absolute path to the `osv-scanner` binary. |
 | `GUARDIA_GITLEAKS_BIN` | search `PATH` | Absolute path to the `gitleaks` binary. |
-| `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` | `.guardia/osv-db` relative to the **current directory** | Where the offline advisory databases live. Set it to an absolute path if you run Guardia from somewhere else. |
+| `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` | `.guardia/osv-db` relative to the **current directory** | Where the offline advisory databases live. Use an absolute path in scripts. |
+| `GUARDIA_DIR` | `<dmsecurity>/.guardia` | Where `scripts/setup.sh` and `scripts/scheduled-scan.sh` keep binaries and databases. |
+| `GUARDIA_STATE_DIR` | `~/.local/state/guardia` | Where `scripts/scheduled-scan.sh` stores reports and `history.log`. |
+| `GUARDIA_NOTIFY` | `desktop` | `none` disables desktop notifications in the scheduled scan. |
 | `GUARDIA_INTEGRATION` | unset | Set to `1` to enable the real-binary integration tests. |
 
 Child processes receive only `PATH` and `HOME`, plus `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` for OSV-Scanner. Nothing else from your shell leaks into the scanners.
 
 **Gitleaks rules.** Every run passes `--config rules/gitleaks/guardia.toml`, which extends the default Gitleaks rule set and adds no allowlists. A `.gitleaks.toml`, `.gitleaksignore` or inline `gitleaks:allow` comment inside the analyzed repository is deliberately ignored: the repository under review must not be able to silence its own findings.
 
-**Database metadata.** If `.guardia/osv-db/guardia-db-meta.json` exists, Guardia copies its `downloadedAt` into the report (`sourceDate` is always `null` today: the OSV source does not publish one). The SHA-256 of the database zip is recomputed on every run, so a replaced database is always visible.
+**Database metadata.** `npm run setup` writes `.guardia/osv-db/guardia-db-meta.json`; DMsecurity copies its `downloadedAt` into the report (`sourceDate` is always `null` today, the OSV source does not publish one). The SHA-256 of the database zip is recomputed on every run, so a replaced database is always visible.
+
+---
+
+## Manual setup
+
+<details>
+<summary>Install the scanners and the database by hand (any platform)</summary>
+
+DMsecurity never bundles the scanners. Get the pinned versions from their releases, verify them, and tell DMsecurity where they are. The Linux x86_64 commands, with checksums, are in [docs/scanners.md](docs/scanners.md); for other platforms pick the matching release asset.
+
+```bash
+export GUARDIA_OSV_SCANNER_BIN=/absolute/path/to/osv-scanner   # 2.7.0
+export GUARDIA_GITLEAKS_BIN=/absolute/path/to/gitleaks         # 8.30.1
+export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=/absolute/path/to/osv-db
+
+# Download one advisory database per ecosystem (network required, once)
+osv-scanner scan --offline --download-offline-databases -L /path/to/package-lock.json --format json > /dev/null
+
+node dist/cli/index.js scan --repo /path/to/repository --ref HEAD --out /tmp/report.json
+```
+
+Already have both tools on `PATH`? Skip the first two exports. The adapters were written against the pinned versions, so other versions may behave differently.
+
+</details>
 
 ---
 
@@ -289,7 +257,7 @@ npm run typecheck               # tsc --noEmit
 GUARDIA_INTEGRATION=1 npm test  # adds 7 tests against the real binaries and database
 ```
 
-The unit suite drives the adapters with a fake tool, so it runs anywhere. The integration suite needs the scanners and the npm database from the Quick start and checks the real lodash advisories, an empty database, a hostile `.gitleaks.toml` and `.gitleaksignore`, among others.
+The unit suite drives the adapters with a fake tool, so it runs anywhere. The integration suite needs the scanners and the npm database from `npm run setup` and checks the real lodash advisories, an empty database, a hostile `.gitleaks.toml` and `.gitleaksignore`, among others.
 
 ---
 
@@ -301,12 +269,13 @@ src/
   core/       snapshot (git cat-file), orchestrator (PASS/FINDINGS/INCOMPLETE), report
   adapters/   runner, osv, gitleaks, scanAll; one adapter per external scanner
   policy/     reserved for a future configurable policy (README only today)
+scripts/      setup.sh (scanners + database) and scheduled-scan.sh (cron + notification)
+examples/     scheduled GitHub Actions workflow that opens an issue on findings
 rules/        Gitleaks team configuration passed with --config on every run
+schemas/      versioned JSON Schema of the report
 fixtures/     synthetic repositories: clean, vulnerable and fake-secret cases
 tests/        core and adapter tests, plus opt-in real-binary integration tests
 docs/         architecture, scanner behaviour, decisions, research report
-schemas/      versioned JSON Schema of the report (guardia-report-1.0.schema.json)
-examples/     reserved for CI and hook examples (README only today)
 .guardia/     Git-ignored: scanner binaries and offline databases
 ```
 
@@ -314,15 +283,15 @@ examples/     reserved for CI and hook examples (README only today)
 
 ## Limits you should know
 
-Guardia is honest about what it is not. Read these before relying on it:
+DMsecurity is honest about what it is not. Read these before relying on it:
 
 - **`PASS` is not "secure".** It means two scanners with a specific database found nothing on the files they support. Logic bugs, misconfigurations and anything outside the OSV and Gitleaks rule sets are out of scope.
-- **Network isolation is not verified.** `--offline` tells OSV-Scanner not to call home, but Guardia does not yet sandbox or trace the process. `--strict-offline` therefore always returns `INCOMPLETE` until a verified isolation mechanism exists.
+- **Network isolation is not verified.** `--offline` tells OSV-Scanner not to call home, but DMsecurity does not yet sandbox or trace the process. `--strict-offline` therefore always returns `INCOMPLETE`.
 - **No severity threshold.** Every finding counts; there is no "fail only on HIGH" option yet.
-- **Database freshness is your job.** Guardia reports the download time and checksum; it never refreshes the database for you.
-- **Working directory matters.** The default database path is relative to where you run Guardia. Use an absolute `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` in scripts.
+- **Database freshness is your job.** The report shows the download time and checksum; run `npm run setup -- --refresh-db` to update.
+- **Working directory matters.** The default database path is relative to where you run the CLI. `npm run scan` and the scripts handle this; raw `guardia` calls should use absolute paths.
 - **Static analysis is not included.** Semgrep CE is a candidate for a later adapter, not a feature.
-- **Pinned to Linux-tested versions.** OSV-Scanner 2.7.0 and Gitleaks 8.30.1 were the versions whose behaviour was observed and recorded in [docs/scanners.md](docs/scanners.md).
+- **Automated setup is Linux x86_64 only.** Other platforms follow the manual steps.
 
 ---
 
@@ -332,15 +301,15 @@ Guardia is honest about what it is not. Read these before relying on it:
 - [x] OSV-Scanner offline adapter, one run per lockfile, database checksum in the report
 - [x] Gitleaks adapter with team config, redaction and distrust of repository allowlists
 - [x] Three-state decision with coverage-first rule and stable exit codes
-- [x] JSON report written atomically outside the repository
-- [x] JSON Schema for report format `1.0` under `schemas/`, validated in the test suite
+- [x] JSON report written atomically outside the repository, with a published JSON Schema
 - [x] CI workflow on Node 22 and 24 with a CLI smoke test
+- [x] One-command setup with checksum verification, scheduled scan script, GitHub Actions alert example
 - [ ] Verified network isolation so `--strict-offline` can reach `PASS`
-- [ ] `--db-dir` flag and a `guardia db download` helper
+- [ ] `--db-dir` flag so raw `guardia` calls need no environment variables
 - [ ] Severity threshold and per-finding suppression with an audit trail
 - [ ] SARIF export
 - [ ] Semgrep CE adapter (optional static analysis)
-- [ ] Ready-to-copy hook and pipeline examples under `examples/`
+- [ ] macOS and Windows support in `scripts/setup.sh`
 - [ ] Evaluate integration with the OpenQodex scan mode (see [docs/decisiones.md](docs/decisiones.md))
 
 ---
@@ -353,7 +322,7 @@ Guardia is honest about what it is not. Read these before relying on it:
 | [docs/scanners.md](docs/scanners.md) | Every command, exit code and quirk observed on the pinned scanner versions, with checksums. |
 | [docs/decisiones.md](docs/decisiones.md) | Why v1 has its own small core instead of extending OpenQodex today. |
 | [docs/research/](docs/research/) | The research report that motivates the project: problem, competitors, costs, roadmap. |
-| [SECURITY.md](SECURITY.md) | How to report a vulnerability in Guardia itself. |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability in DMsecurity itself. |
 
 ---
 
@@ -364,5 +333,5 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code
 Licensed under **Apache-2.0**. See [LICENSE](LICENSE) and [NOTICE](NOTICE). OSV-Scanner and Gitleaks keep their own licenses and are not redistributed in this repository.
 
 <div align="center">
-<sub>Built for people who want to know exactly what was checked before they trust a green light.</sub>
+<sub>DMsecurity · built for people who want to know exactly what was checked before they trust a green light.</sub>
 </div>
