@@ -43,20 +43,21 @@ const scenario = JSON.parse(fs.readFileSync(self + ".scenario.json", "utf8"));
 const argv = process.argv.slice(2);
 fs.writeFileSync(self + ".argv.json", JSON.stringify(argv));
 if (scenario.version !== undefined && (argv.includes("--version") || argv.includes("version"))) {
-  process.stdout.write(scenario.version + "\\n");
-  process.exit(0);
+  fs.writeSync(1, scenario.version + "\\n");
+  process.exitCode = 0;
+  return;
 }
 const reportIndex = argv.indexOf("--report-path");
 if (scenario.report !== undefined && reportIndex !== -1 && argv[reportIndex + 1]) {
   fs.writeFileSync(argv[reportIndex + 1], scenario.report);
 }
-if (scenario.stderr) process.stderr.write(scenario.stderr);
+if (scenario.stderr) fs.writeSync(2, scenario.stderr);
 if (scenario.stdoutBytes) {
-  process.stdout.write(Buffer.alloc(scenario.stdoutBytes, 120));
+  fs.writeSync(1, Buffer.alloc(scenario.stdoutBytes, 120));
 } else if (scenario.stdout) {
-  process.stdout.write(scenario.stdout);
+  fs.writeSync(1, scenario.stdout);
 }
-const finish = () => process.exit(scenario.exitCode ?? 0);
+const finish = () => { process.exitCode = scenario.exitCode ?? 0; };
 if (scenario.sleepMs) setTimeout(finish, scenario.sleepMs); else finish();
 `;
 

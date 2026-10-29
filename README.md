@@ -92,21 +92,31 @@ flowchart LR
 
 ## Quick start
 
-Three commands on Linux x86_64. Other platforms: see [manual setup](#manual-setup) below.
+One command on Linux x86_64 after installing Node 22+ and npm. It downloads
+the scanners, verifies them, asks for the repository and WhatsApp recipient,
+shows the QR, and can activate periodic checks and the pre-commit hook. Other
+platforms: see [manual setup](#manual-setup) below.
 
 ```bash
 git clone https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject.git dmsecurity
 cd dmsecurity
-npm ci && npm run build      # 1. build the CLI (Node 22+)
-npm run setup                # 2. scanners + offline advisory database, checksums verified
-npm run scan -- --repo /path/to/your/repository --ref HEAD --out /tmp/report.json   # 3. scan
+bash scripts/install.sh
 ```
 
-What `npm run setup` does, so you can trust it:
+The setup assistant asks before linking WhatsApp, enabling a systemd user timer
+or installing a Git pre-commit hook. It never overwrites an existing hook.
+Your WhatsApp recipient is stored privately in
+`~/.config/dmsecurity/whatsapp.json`, so it does not need to be exported again.
+After configuration, it sends `DMsecurity · La configuración ha sido completada.`
+and immediately runs the first verification; that result is also notified,
+including a clean `PASS` result.
+
+What `bash scripts/install.sh` does, so you can trust it:
 
 - Downloads **OSV-Scanner 2.7.0** and **Gitleaks 8.30.1** from their GitHub releases into the Git-ignored folder `.guardia/tools/` and verifies each SHA-256 against the values recorded in [docs/scanners.md](docs/scanners.md). Your system stays untouched.
 - Downloads the OSV advisory database for npm (about 220 MB, once) into `.guardia/osv-db/` and writes the metadata the report uses. Need other ecosystems? Pass one lockfile per ecosystem: `npm run setup -- --lockfile /path/to/poetry.lock`.
 - Is safe to re-run. Present binaries are kept, and so is the database when you pass no `--lockfile`; `npm run setup -- --refresh-db` or an explicit `--lockfile` downloads fresh advisories.
+- Starts `guardia onboard` in an interactive terminal. Use `npm run setup -- --no-onboard` for automation without prompts.
 
 `npm run scan` is `guardia scan` with the environment already pointed at those folders. Run it from the DMsecurity directory.
 
@@ -133,6 +143,62 @@ scripts/scheduled-scan.sh /path/to/your/repository
 ```
 
 Set `GUARDIA_NOTIFY=none` to silence notifications and `GUARDIA_STATE_DIR` to move the reports. Without a session bus the scan still runs and logs; only the pop-up is skipped.
+
+### Optional WhatsApp alerts
+
+WhatsApp delivery is opt-in and sends a short, redacted summary only. It never
+sends source code, secret values or the JSON report. It uses a local
+[Baileys](https://github.com/WhiskeySockets/Baileys) WhatsApp Web session: no
+Meta Cloud API, developer account or token is needed. Link the sending account
+once by QR. The one-command installer does this interactively and persists the
+destination privately, so no environment variables are needed for normal use.
+
+```bash
+# During bash scripts/install.sh answer the prompts, then scan the QR from
+# WhatsApp: Settings > Linked devices > Link a device.
+# Enter the destination with country code, for example +521XXXXXXXXXX.
+```
+
+Delivery failures remain in a private local outbox and never change the scan
+verdict. The linked-session keys are stored in
+`$XDG_STATE_HOME/dmsecurity/whatsapp-auth` (or under `DMSECURITY_STATE_DIR`)
+with restricted permissions. If WhatsApp invalidates the linked device, run
+`guardia whatsapp login` again. `DMSECURITY_WHATSAPP_RECIPIENT` remains an
+optional per-process override for advanced use. WhatsApp cannot be combined with
+`--strict-offline`, because sending a message requires network access.
+
+To start a link from scratch, first remove the DMsecurity device in WhatsApp's
+**Linked devices** screen, then run `guardia whatsapp reset` before onboarding
+again. This removes only local linked-device credentials.
+
+### Schedule a local recurring scan
+
+The installer can create and activate a systemd user timer after an explicit
+prompt. `schedule add` remains available for manual changes; it writes a
+disabled timer and prints the exact activation command.
+
+```bash
+node dist/cli/index.js schedule add \
+  --repo /path/to/repo --ref main --every 6h \
+  --notify whatsapp --on findings,incomplete
+node dist/cli/index.js schedule list
+```
+
+### Check staged changes before a commit
+
+`check-staged` reads Git's staged index directly and creates a temporary
+snapshot; it does not write, stash or check out the target repository. The
+installer can add the optional hook after confirmation. For manual changes:
+
+```bash
+node dist/cli/index.js hook install --repo /path/to/repo --mode block --notify whatsapp
+```
+
+`block` rejects `FINDINGS` and `INCOMPLETE`; `warn` prints the result but lets
+the commit proceed. DMsecurity never overwrites an existing pre-commit hook.
+To also receive a WhatsApp confirmation for a clean staged change, add
+`--on pass,findings,incomplete` when installing the hook; this is off by
+default to avoid notification noise.
 
 ### In GitHub: scheduled scan that opens an issue
 
@@ -205,7 +271,9 @@ Detected lockfile names: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`
 
 ## Configuration
 
-No config file. Everything is an environment variable, and `npm run scan` sets the first three for you:
+Scanner settings use environment variables, and `npm run scan` sets the first
+three for you. The interactive installer additionally stores the WhatsApp
+destination in a private local configuration file.
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
@@ -215,6 +283,10 @@ No config file. Everything is an environment variable, and `npm run scan` sets t
 | `GUARDIA_DIR` | `<dmsecurity>/.guardia` | Where `scripts/setup.sh` and `scripts/scheduled-scan.sh` keep binaries and databases. |
 | `GUARDIA_STATE_DIR` | `~/.local/state/guardia` | Where `scripts/scheduled-scan.sh` stores reports and `history.log`. |
 | `GUARDIA_NOTIFY` | `desktop` | `none` disables desktop notifications in the scheduled scan. |
+| `GUARDIA_NOTIFY_ON` | `findings,incomplete` | Scheduled WhatsApp notification kinds. |
+| `DMSECURITY_STATE_DIR` | XDG state directory | Private notification outbox and delivery history. |
+| `DMSECURITY_CONFIG_DIR` | XDG config directory | Private local configuration, including the configured WhatsApp destination. |
+| `DMSECURITY_WHATSAPP_RECIPIENT` | saved local destination | Optional per-process override in international E.164 digits; no API token is used. |
 | `GUARDIA_INTEGRATION` | unset | Set to `1` to enable the real-binary integration tests. |
 
 Child processes receive only `PATH` and `HOME`, plus `OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY` for OSV-Scanner. Nothing else from your shell leaks into the scanners.
@@ -270,6 +342,8 @@ src/
   adapters/   runner, osv, gitleaks, scanAll; one adapter per external scanner
   policy/     reserved for a future configurable policy (README only today)
 scripts/      setup.sh (scanners + database) and scheduled-scan.sh (cron + notification)
+              pre-commit.sh (opt-in staged-index gate)
+src/notifications/  redacted events, private outbox and WhatsApp transport
 examples/     scheduled GitHub Actions workflow that opens an issue on findings
 rules/        Gitleaks team configuration passed with --config on every run
 schemas/      versioned JSON Schema of the report

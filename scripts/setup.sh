@@ -2,7 +2,7 @@
 # DMsecurity setup: install the pinned scanners and the OSV offline database.
 #
 # Usage:
-#   scripts/setup.sh [--lockfile <path>]... [--refresh-db] [--skip-db]
+#   scripts/setup.sh [--lockfile <path>]... [--refresh-db] [--skip-db] [--no-onboard]
 #
 # Installs OSV-Scanner and Gitleaks into <repo>/.guardia/tools after verifying
 # their SHA-256 against the values recorded in docs/scanners.md, then downloads
@@ -36,6 +36,7 @@ OSV_SOURCE_BASE="https://osv-vulnerabilities.storage.googleapis.com"
 lockfiles=()
 refresh_db=0
 skip_db=0
+onboard=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --lockfile)
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
       lockfiles+=("$2"); shift 2 ;;
     --refresh-db) refresh_db=1; shift ;;
     --skip-db) skip_db=1; shift ;;
+    --no-onboard) onboard=0; shift ;;
     -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     *) echo "setup: unknown option '$1'" >&2; exit 2 ;;
   esac
@@ -146,7 +148,14 @@ fi
 cat <<MSG
 
 setup: done. Scanners in ${TOOLS_DIR#"$ROOT"/}, databases in ${DB_DIR#"$ROOT"/}.
-Run a scan from this directory with:
-
-  npm run scan -- --repo /path/to/repository --ref HEAD --out /tmp/report.json
 MSG
+
+if [ "$onboard" -eq 1 ] && [ -t 0 ] && [ -t 1 ]; then
+  log "starting the interactive configuration"
+  export GUARDIA_OSV_SCANNER_BIN="$TOOLS_DIR/osv-scanner"
+  export GUARDIA_GITLEAKS_BIN="$TOOLS_DIR/gitleaks"
+  export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$DB_DIR"
+  node "$ROOT/dist/cli/index.js" onboard
+elif [ "$onboard" -eq 1 ]; then
+  log "interactive configuration skipped (no terminal); run 'guardia onboard' from a terminal when ready"
+fi

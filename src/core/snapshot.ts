@@ -45,6 +45,13 @@ interface GitTreeEntry {
   path: string;
 }
 
+interface GitIndexEntry {
+  mode: string;
+  object: string;
+  stage: string;
+  path: string;
+}
+
 function sanitiseGitError(error: unknown, fallback: string): string {
   if (error instanceof Error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -104,6 +111,21 @@ function parseTree(raw: Buffer): GitTreeEntry[] {
   return entries;
 }
 
+function parseIndex(raw: Buffer): GitIndexEntry[] {
+  const entries: GitIndexEntry[] = [];
+  for (const record of raw.toString("utf8").split("\0")) {
+    if (!record) continue;
+    const match = /^(\d+) ([0-9a-f]{40,64}) (\d)\t([\s\S]+)$/.exec(record);
+    if (!match) throw new SnapshotError("Git returned an invalid index entry.");
+    const [, mode, object, stage, path] = match;
+    if (!mode || !object || !stage || !path || !isSafeRelativePath(path)) {
+      throw new SnapshotError("The index contains an unsafe path and cannot be snapshotted.");
+    }
+    entries.push({ mode, object, stage, path });
+  }
+  return entries;
+}
+
 async function resolveRepository(repository: string): Promise<string> {
   try {
     const info = await stat(repository);
@@ -136,6 +158,26 @@ function isLockfile(path: string): boolean {
   return LOCKFILE_NAMES.has(name);
 }
 
+async function copyBlob(
+  repository: string,
+  snapshotDir: string,
+  mode: string,
+  object: string,
+  path: string,
+): Promise<void> {
+  const destination = resolve(snapshotDir, ...path.split("/"));
+  if (!isPathInside(snapshotDir, destination)) {
+    throw new SnapshotError("A snapshot entry resolved outside its temporary directory.");
+  }
+  const content = await git(repository, ["cat-file", "blob", object]);
+  const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, bytes, {
+    flag: "wx",
+    mode: mode === "100755" ? 0o700 : 0o600,
+  });
+}
+
 /**
  * Materializes tracked regular blobs from a commit without checking anything out
  * into the repository under review. Symlinks and gitlinks are deliberately not
@@ -157,20 +199,8 @@ export async function createSnapshot(repositoryInput: string, ref: string): Prom
         continue;
       }
 
-      const destination = resolve(snapshotDir, ...entry.path.split("/"));
-      if (!isPathInside(snapshotDir, destination)) {
-        omitted.push(`${entry.path}: rejected unsafe destination`);
-        continue;
-      }
-
       try {
-        const content = await git(repository, ["cat-file", "blob", entry.object]);
-        const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
-        await mkdir(dirname(destination), { recursive: true });
-        await writeFile(destination, bytes, {
-          flag: "wx",
-          mode: entry.mode === "100755" ? 0o700 : 0o600,
-        });
+        await copyBlob(repository, snapshotDir, entry.mode, entry.object, entry.path);
         if (isLockfile(entry.path)) lockfiles.push(entry.path);
       } catch {
         omitted.push(`${entry.path}: could not copy blob`);
@@ -190,6 +220,52 @@ export async function createSnapshot(repositoryInput: string, ref: string): Prom
     await rm(snapshotDir, { recursive: true, force: true });
     if (error instanceof SnapshotError) throw error;
     throw new SnapshotError("The commit could not be copied into a safe snapshot.");
+  }
+}
+
+/**
+ * Creates a private snapshot from the staged Git index. This is deliberately
+ * read-only with respect to the source repository: it reads index entries and
+ * blobs directly and never calls checkout, write-tree or stash.
+ */
+export async function createIndexSnapshot(repositoryInput: string): Promise<Snapshot> {
+  const repository = await resolveRepository(repositoryInput);
+  const snapshotDir = await mkdtemp(join(tmpdir(), "guardia-index-"));
+  const excluded: string[] = [];
+  const omitted: string[] = [];
+  const lockfiles: string[] = [];
+
+  try {
+    const index = await git(repository, ["ls-files", "--cached", "--stage", "-z"]);
+    for (const entry of parseIndex(Buffer.isBuffer(index) ? index : Buffer.from(index))) {
+      if (entry.stage !== "0") {
+        omitted.push(`${entry.path}: unmerged index entry`);
+        continue;
+      }
+      if (entry.mode !== "100644" && entry.mode !== "100755") {
+        excluded.push(`${entry.path}: skipped non-regular index entry`);
+        continue;
+      }
+      try {
+        await copyBlob(repository, snapshotDir, entry.mode, entry.object, entry.path);
+        if (isLockfile(entry.path)) lockfiles.push(entry.path);
+      } catch {
+        omitted.push(`${entry.path}: could not copy staged blob`);
+      }
+    }
+    return {
+      repository,
+      commit: null,
+      snapshotDir,
+      lockfiles: lockfiles.sort(),
+      excluded,
+      omitted,
+      complete: excluded.length === 0 && omitted.length === 0,
+    };
+  } catch (error) {
+    await rm(snapshotDir, { recursive: true, force: true });
+    if (error instanceof SnapshotError) throw error;
+    throw new SnapshotError("The staged index could not be copied into a safe snapshot.");
   }
 }
 

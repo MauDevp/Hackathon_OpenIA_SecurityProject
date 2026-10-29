@@ -48,7 +48,8 @@ export type ScanAll = (input: ScanInput) => Promise<ScannerResult[]>;
 
 export interface Snapshot {
   repository: string;
-  commit: string;
+  /** Null when the snapshot represents the staged Git index rather than a commit. */
+  commit: string | null;
   snapshotDir: string;
   lockfiles: string[];
   /** Git entries not copied into the snapshot, such as symlinks and gitlinks. */

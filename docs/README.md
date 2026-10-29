@@ -9,3 +9,5 @@
   escáneres.
 - [decisiones.md](decisiones.md): decisión de adaptación separada de
   OpenQodex.
+- [plan-whatsapp.md](plan-whatsapp.md): diseño y alcance de alertas por
+  WhatsApp, programación local y validación pre-commit.

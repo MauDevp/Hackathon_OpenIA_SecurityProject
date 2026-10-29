@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx 'tests/**/*.test.ts'",
     "clean": "rm -rf dist",
-    "setup": "bash scripts/setup.sh",
+    "setup": "npm run build && bash scripts/setup.sh",
     "scan": "GUARDIA_OSV_SCANNER_BIN=$PWD/.guardia/tools/osv-scanner GUARDIA_GITLEAKS_BIN=$PWD/.guardia/tools/gitleaks OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=$PWD/.guardia/osv-db node dist/cli/index.js scan",
     "scan:scheduled": "bash scripts/scheduled-scan.sh"
   },
@@ -38,5 +38,10 @@
     "osv",
     "sarif",
     "git"
-  ]
+  ],
+  "dependencies": {
+    "@types/qrcode-terminal": "^0.12.2",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "qrcode-terminal": "^0.12.0"
+  }
 }
