@@ -109,7 +109,9 @@ Your WhatsApp recipient is stored privately in
 `~/.config/dmsecurity/whatsapp.json`, so it does not need to be exported again.
 After configuration, it sends `DMsecurity · La configuración ha sido completada.`
 and immediately runs the first verification; that result is also notified,
-including a clean `PASS` result.
+including a clean `PASS` result. Each alert states whether it reviewed known
+dependency vulnerabilities and exposed secrets, then gives a safe next-step
+recommendation without sending source code, paths or secret values.
 
 What `bash scripts/install.sh` does, so you can trust it:
 

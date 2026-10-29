@@ -32,6 +32,7 @@ import {
 import { loadWhatsAppSettings, saveWhatsAppSettings } from "../notifications/settings.js";
 import { notificationStateDir } from "../notifications/state.js";
 import { addSchedule, listSchedules, removeSchedule, writeScheduleUnits } from "../schedule.js";
+import { setupBanner, setupError, setupResult, setupStep, setupSuccess, setupWarning } from "./presentation.js";
 
 const execFile = promisify(execFileCallback);
 const installationRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -454,7 +455,7 @@ function enabled(answer: string, fallback: boolean): boolean {
   if (!value) return fallback;
   if (["y", "yes", "s", "si", "sí"].includes(value)) return true;
   if (["n", "no"].includes(value)) return false;
-  throw new CliError("Answer yes or no.");
+  throw new CliError("Responde sí o no.");
 }
 
 async function enableSchedule(id: string): Promise<void> {
@@ -495,10 +496,10 @@ function useInstalledScannersForOnboarding(): void {
 
 /** One interactive setup: local settings, QR link, user timer and pre-commit hook. */
 async function runOnboard(): Promise<number> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliError("onboard requires an interactive terminal.");
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliError("onboard requiere una terminal interactiva.");
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    process.stdout.write("DMsecurity setup\n");
+    process.stdout.write(setupBanner());
     const invalidSchedules = [];
     for (const entry of await listSchedules()) {
       try {
@@ -507,38 +508,44 @@ async function runOnboard(): Promise<number> {
         invalidSchedules.push(entry);
       }
     }
-    if (invalidSchedules.length > 0 && enabled(await terminal.question(`Remove ${invalidSchedules.length} invalid existing schedule(s)? [Y/n]: `), true)) {
+    if (invalidSchedules.length > 0 && enabled(await terminal.question(`¿Eliminar ${invalidSchedules.length} programación(es) inválida(s)? [S/n]: `), true)) {
       for (const entry of invalidSchedules) {
         await disableSchedule(entry.id);
         await removeSchedule(entry.id);
       }
       await reloadUserSystemd();
-      process.stdout.write("Invalid schedules removed.\n");
+      process.stdout.write(setupSuccess("Programaciones inválidas eliminadas."));
     }
-    const repositoryInput = (await terminal.question(`Repository to protect [${process.cwd()}]: `)).trim() || process.cwd();
+    process.stdout.write(setupStep(1, "Repositorio", "Selecciona un repositorio Git local y la referencia que se revisará."));
+    const repositoryInput = (await terminal.question(`Repositorio a proteger [${process.cwd()}]: `)).trim() || process.cwd();
     const repository = await validateGitRepository(repositoryInput);
-    const reference = (await terminal.question("Branch or ref to scan periodically [HEAD]: ")).trim() || "HEAD";
+    const reference = (await terminal.question("Rama o referencia para revisiones periódicas [HEAD]: ")).trim() || "HEAD";
     await validateReference(repository, reference);
+    process.stdout.write(setupSuccess(`Repositorio validado · referencia ${reference}`));
 
-    const configureWhatsApp = enabled(await terminal.question("Configure WhatsApp alerts now? [Y/n]: "), true);
+    process.stdout.write(setupStep(2, "Alertas por WhatsApp", "Vincula una cuenta por QR; solo se enviarán resúmenes seguros."));
+    const configureWhatsApp = enabled(await terminal.question("¿Configurar alertas por WhatsApp ahora? [S/n]: "), true);
     if (configureWhatsApp) {
       const saved = await loadWhatsAppSettings();
       const current = saved ? ` [${saved.recipient}]` : "";
-      const enteredRecipient = (await terminal.question(`Alert recipient with country code, starting with +${current}: `)).trim();
+      const enteredRecipient = (await terminal.question(`Número destinatario con código de país y +${current}: `)).trim();
       if (enteredRecipient && !enteredRecipient.startsWith("+")) {
-        throw new CliError("Enter the WhatsApp recipient with its country code, starting with + (for example +521...).");
+        throw new CliError("Escribe el número con código de país y + (por ejemplo +521...).");
       }
       const recipient = enteredRecipient || saved?.recipient;
-      if (!recipient) throw new CliError("A WhatsApp recipient is required when alerts are enabled.");
+      if (!recipient) throw new CliError("Se requiere un número destinatario para activar las alertas.");
       const settings = await saveWhatsAppSettings(recipient);
-      process.stdout.write(`Recipient saved locally: ${settings.recipient}\n`);
+      process.stdout.write(setupSuccess(`Destinatario guardado localmente · ${settings.recipient}`));
       await loginWhatsApp();
-      process.stdout.write("WhatsApp linked.\n");
+      process.stdout.write(setupSuccess("WhatsApp vinculado."));
+    } else {
+      process.stdout.write(setupWarning("Las alertas por WhatsApp permanecerán desactivadas."));
     }
 
-    const scheduleScan = enabled(await terminal.question("Create and activate a periodic scan? [Y/n]: "), true);
+    process.stdout.write(setupStep(3, "Automatización", "Crea revisiones periódicas y una protección opcional antes de cada commit."));
+    const scheduleScan = enabled(await terminal.question("¿Crear y activar una revisión periódica? [S/n]: "), true);
     if (scheduleScan) {
-      const every = (await terminal.question("Interval (for example 6h or 1d) [6h]: ")).trim() || "6h";
+      const every = (await terminal.question("Intervalo (por ejemplo 6h o 1d) [6h]: ")).trim() || "6h";
       const entry = await addSchedule({
         repository,
         ref: reference,
@@ -548,28 +555,29 @@ async function runOnboard(): Promise<number> {
       });
       await writeScheduleUnits(entry, scheduledScript);
       await enableSchedule(entry.id);
-      process.stdout.write(`Periodic scan activated every ${entry.every}.\n`);
+      process.stdout.write(setupSuccess(`Revisión periódica activada cada ${entry.every}.`));
     }
 
-    const installPreCommit = enabled(await terminal.question("Install the pre-commit security hook? [Y/n]: "), true);
+    const installPreCommit = enabled(await terminal.question("¿Instalar la protección pre-commit? [S/n]: "), true);
     if (installPreCommit) {
-      const requestedMode = (await terminal.question("Hook mode: block or warn [block]: ")).trim() || "block";
-      if (requestedMode !== "block" && requestedMode !== "warn") throw new CliError("Hook mode must be block or warn.");
+      const requestedMode = (await terminal.question("Modo del hook: block o warn [block]: ")).trim() || "block";
+      if (requestedMode !== "block" && requestedMode !== "warn") throw new CliError("El modo del hook debe ser block o warn.");
       try {
         const hookPath = await installHook(repository, requestedMode, configureWhatsApp ? "whatsapp" : "none", "findings,incomplete");
-        process.stdout.write(`Pre-commit hook installed: ${hookPath}\n`);
+        process.stdout.write(setupSuccess(`Protección pre-commit instalada · ${hookPath}`));
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Could not install the pre-commit hook.";
-        process.stderr.write(`DMsecurity setup: hook skipped: ${message}\n`);
+        const message = error instanceof Error ? error.message : "No se pudo instalar la protección pre-commit.";
+        process.stdout.write(setupWarning(`Protección pre-commit omitida · ${message}`));
       }
     }
 
+    process.stdout.write(setupStep(4, "Primera verificación", "Se revisarán dependencias vulnerables y secretos expuestos."));
     if (configureWhatsApp) {
       try {
         await sendWhatsAppConfigurationCompleted(await whatsAppOptionsFromEnvironment());
-        process.stdout.write("WhatsApp configuration confirmation sent.\n");
+        process.stdout.write(setupSuccess("Confirmación de configuración enviada por WhatsApp."));
       } catch {
-        process.stderr.write("DMsecurity setup: could not send the WhatsApp configuration confirmation; verify that the recipient has WhatsApp and includes its country code.\n");
+        process.stdout.write(setupError("No se pudo enviar la confirmación de WhatsApp. Verifica el destinatario y su código de país."));
       }
     }
 
@@ -580,13 +588,16 @@ async function runOnboard(): Promise<number> {
       out: firstScanReportPath(),
       strictOffline: false,
     });
-    process.stdout.write(`First verification:\n${terminalSummary(firstScan.result, firstScan.output)}`);
+    process.stdout.write(setupResult(firstScan.result.status, firstScan.result.findings.length));
+    process.stdout.write(`\n${terminalSummary(firstScan.result, firstScan.output)}`);
     if (configureWhatsApp) {
       const status = await notifyAnalysis(firstScan.result, repository, reference, "manual", ["pass", "findings", "incomplete"]);
-      process.stdout.write(`First verification notification: ${status}\n`);
+      process.stdout.write(status === "sent"
+        ? setupSuccess("Resultado de la primera verificación enviado por WhatsApp.")
+        : setupWarning(`Resultado de la primera verificación: ${status}.`));
     }
 
-    process.stdout.write("DMsecurity setup complete.\n");
+    process.stdout.write(`\n${setupSuccess("Configuración terminada. Tu repositorio ya tiene una primera línea de defensa.")}`);
     return 0;
   } finally {
     terminal.close();

@@ -63,20 +63,39 @@ export function notificationDedupeKey(event: NotificationEvent): string {
   return createHash("sha256").update(stable).digest("hex");
 }
 
+function scannerReview(event: NotificationEvent): string {
+  const state = new Map(event.scannerStates.map((item) => [item.scanner, item.status]));
+  const osv = state.get("osv") === "ok" ? "dependencias conocidas (OSV)" : "dependencias: cobertura pendiente";
+  const gitleaks = state.get("gitleaks") === "ok" ? "secretos expuestos (Gitleaks)" : "secretos: cobertura pendiente";
+  return `${osv} · ${gitleaks}`;
+}
+
+function improvement(event: NotificationEvent): string {
+  if (event.status === "PASS") {
+    return "Mejora continua: mantén las dependencias actualizadas y vuelve a revisar cada cambio importante.";
+  }
+  if (event.status === "FINDINGS") {
+    return "Mejora recomendada: abre el reporte local, actualiza dependencias afectadas y rota secretos si aplica.";
+  }
+  const unavailable = event.scannerStates.filter((item) => item.status !== "ok").map((item) => item.scanner).join(", ");
+  return `Mejora necesaria: instala o corrige ${unavailable || "los componentes pendientes"} y vuelve a ejecutar la revisión.`;
+}
+
 /** The only text allowed to leave the machine through the WhatsApp transport. */
 export function formatWhatsAppMessage(event: NotificationEvent): string {
   const commit = event.commit ? event.commit.slice(0, 7) : "staged changes";
-  const scanners = event.scannerStates.map((state) => `${state.scanner}: ${state.status}`).join(" · ");
-  const action = event.status === "PASS"
-    ? "Required scanners completed without findings. This is not a security guarantee."
+  const title = event.status === "PASS" ? "✅ SIN HALLAZGOS" : event.status === "FINDINGS" ? "⚠️ HALLAZGOS" : "🟡 COBERTURA INCOMPLETA";
+  const outcome = event.status === "PASS"
+    ? "Resultado: no se detectaron hallazgos. Esto no garantiza seguridad absoluta."
     : event.status === "FINDINGS"
-      ? "Review the local report before continuing."
-      : "Coverage is incomplete; review the local installation and report.";
+      ? `Resultado: se detectaron ${event.findingCount} hallazgo(s).`
+      : "Resultado: no se completó toda la cobertura.";
   const lines = [
-    `DMsecurity · ${event.status}`,
-    `Repo: ${redactSecrets(event.repository)} · target: ${redactSecrets(commit)}`,
-    `Findings: ${event.findingCount} · ${scanners || "scanners unavailable"}`,
-    action,
+    `DMsecurity · ${title}`,
+    `Proyecto: ${redactSecrets(event.repository)} · objetivo: ${redactSecrets(commit)}`,
+    `Revisé: ${scannerReview(event)}`,
+    outcome,
+    improvement(event),
   ];
   return redactSecrets(lines.join("\n")).slice(0, 1024);
 }

@@ -237,7 +237,7 @@ export async function loginWhatsApp(options: WhatsAppLoginOptions = {}): Promise
   let shown = false;
   const onQr = options.onQr ?? ((value: string) => {
     if (!shown) {
-      process.stdout.write("Scan this QR from WhatsApp > Linked devices > Link a device:\n");
+      process.stdout.write("Escanea este QR desde WhatsApp > Dispositivos vinculados > Vincular un dispositivo:\n");
       shown = true;
     }
     runtime.renderQr(value);
