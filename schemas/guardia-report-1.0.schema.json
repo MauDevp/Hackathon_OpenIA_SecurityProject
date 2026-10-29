@@ -1,0 +1,207 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/schemas/guardia-report-1.0.schema.json",
+  "title": "Guardia Offline report",
+  "description": "JSON report written by `guardia scan`, format version 1.0. Secrets are never present: every string is redacted before writing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion",
+    "status",
+    "exitCode",
+    "executedAt",
+    "commit",
+    "isolation",
+    "snapshot",
+    "lockfiles",
+    "filesAnalyzed",
+    "omitted",
+    "scanners",
+    "findings"
+  ],
+  "properties": {
+    "formatVersion": {
+      "const": "1.0"
+    },
+    "status": {
+      "description": "PASS: every required scanner completed with no findings. FINDINGS: at least one finding. INCOMPLETE: a scanner, database or part of the snapshot was missing; missing coverage always wins over findings.",
+      "enum": ["PASS", "FINDINGS", "INCOMPLETE"]
+    },
+    "exitCode": {
+      "description": "Process exit code: 0 for PASS, 1 for FINDINGS, 2 for INCOMPLETE.",
+      "enum": [0, 1, 2]
+    },
+    "executedAt": {
+      "description": "UTC timestamp in ISO 8601 format.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "commit": {
+      "description": "Full SHA of the analyzed commit (40 hex for SHA-1 repositories, 64 for SHA-256 repositories), or null when the snapshot could not be created.",
+      "type": ["string", "null"],
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "isolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "strictOffline"],
+      "properties": {
+        "status": {
+          "description": "verified: a network-isolation mechanism confirmed no outbound traffic. unverified: strict mode was requested but no mechanism exists. not_requested: strict mode was off.",
+          "enum": ["verified", "unverified", "not_requested"]
+        },
+        "strictOffline": {
+          "type": "boolean"
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "excluded", "omitted"],
+      "properties": {
+        "complete": {
+          "description": "False when any entry could not be copied into the snapshot or when the snapshot failed.",
+          "type": "boolean"
+        },
+        "excluded": {
+          "description": "Git entries deliberately not copied, such as symlinks and submodules.",
+          "$ref": "#/definitions/stringList"
+        },
+        "omitted": {
+          "description": "Entries that could not be copied. Any value makes the snapshot incomplete.",
+          "$ref": "#/definitions/stringList"
+        },
+        "error": {
+          "description": "Sanitized reason when the snapshot could not be created.",
+          "type": "string"
+        }
+      }
+    },
+    "lockfiles": {
+      "description": "Lockfiles detected by name in the snapshot, relative to its root.",
+      "$ref": "#/definitions/stringList"
+    },
+    "filesAnalyzed": {
+      "description": "Union of the files every scanner confirmed as fully reviewed, sorted.",
+      "$ref": "#/definitions/stringList"
+    },
+    "omitted": {
+      "description": "Snapshot omissions followed by scanner omissions, each as `<scanner>: <path>: <reason>`.",
+      "$ref": "#/definitions/stringList"
+    },
+    "scanners": {
+      "description": "One entry per required scanner, in the order osv, gitleaks.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/scannerResult"
+      }
+    },
+    "findings": {
+      "description": "Every finding from every scanner, redacted.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/finding"
+      }
+    }
+  },
+  "definitions": {
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "scannerName": {
+      "enum": ["osv", "gitleaks"]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanner", "type", "id", "path", "summary"],
+      "properties": {
+        "scanner": {
+          "$ref": "#/definitions/scannerName"
+        },
+        "type": {
+          "enum": ["dependency", "secret"]
+        },
+        "id": {
+          "description": "Advisory identifier (for example GHSA-xxxx-xxxx-xxxx) or Gitleaks rule id.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path relative to the snapshot root. Never a secret value.",
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "summary": {
+          "description": "Redacted human-readable description. Never contains a secret value.",
+          "type": "string"
+        }
+      }
+    },
+    "scannerDatabase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["downloadedAt", "sourceDate", "sha256"],
+      "properties": {
+        "downloadedAt": {
+          "description": "When the offline database was downloaded, from guardia-db-meta.json, or null.",
+          "type": ["string", "null"]
+        },
+        "sourceDate": {
+          "description": "Date of the advisory data as reported by the source, or null when not provided.",
+          "type": ["string", "null"]
+        },
+        "sha256": {
+          "description": "SHA-256 of the database file, recomputed on every run, or null when absent.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "scannerResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanner", "status", "version", "filesAnalyzed", "omitted", "findings"],
+      "properties": {
+        "scanner": {
+          "$ref": "#/definitions/scannerName"
+        },
+        "status": {
+          "description": "ok: the scanner completed. missing: binary or database not found. unsupported: nothing to analyze or the snapshot failed. error: the scanner failed.",
+          "enum": ["ok", "missing", "error", "unsupported"]
+        },
+        "version": {
+          "description": "Version reported by the binary, or null when it did not run.",
+          "type": ["string", "null"]
+        },
+        "filesAnalyzed": {
+          "description": "Only files for which this scanner confirmed a completed review.",
+          "$ref": "#/definitions/stringList"
+        },
+        "omitted": {
+          "description": "Files or scopes for which coverage could not be established, as `<path>: <reason>`.",
+          "$ref": "#/definitions/stringList"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/finding"
+          }
+        },
+        "error": {
+          "description": "Sanitized diagnostic. Never scanner output that could contain a secret.",
+          "type": "string"
+        },
+        "database": {
+          "$ref": "#/definitions/scannerDatabase"
+        }
+      }
+    }
+  }
+}
