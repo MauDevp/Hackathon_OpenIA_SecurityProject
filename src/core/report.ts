@@ -94,8 +94,14 @@ export function terminalSummary(result: AnalysisResult, reportPath: string): str
     `isolation: ${result.isolation}${result.strictOffline ? " (strict requested)" : ""}`,
     `findings: ${result.findings.length}`,
   ];
+  if (result.snapshotError) {
+    lines.push(`fallo: snapshot · motivo: ${result.snapshotError}`);
+  }
   for (const scanner of result.scanners) {
     lines.push(`${scanner.scanner}: ${scanner.status}${scanner.version ? ` (${scanner.version})` : ""}`);
+    if (scanner.status !== "ok") {
+      lines.push(`fallo: escáner ${scanner.scanner} · motivo: ${scanner.error ?? "no se pudo completar la cobertura"}`);
+    }
   }
   lines.push(`report: ${reportPath}`);
   return `${lines.map(redactSecrets).join("\n")}\n`;

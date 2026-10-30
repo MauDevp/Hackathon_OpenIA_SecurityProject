@@ -107,6 +107,7 @@ After installation, use the local command from a terminal whose `PATH` includes
 `~/.local/bin`:
 
 ```bash
+dmsecurity           # open the interactive action menu
 dmsecurity --login   # link WhatsApp with a QR code
 dmsecurity --logout  # remove the local linked-device session
 dmsecurity onboard   # guided repository, alert and hook setup
@@ -125,6 +126,12 @@ WhatsApp alert headed `DMsecurity 🛡️`: it confirms the completed configurat
 summarizes the first result (including a clean `PASS`) and states what was
 reviewed. Each alert ends with a safe next-step recommendation without sending
 source code, paths or secret values.
+
+If a WhatsApp delivery cannot be completed, the terminal identifies the safe
+failure point—configuration, connection, recipient or delivery—and gives the
+reason without printing credentials, phone numbers or provider logs. The first
+periodic timer is activated only after this first alert, so it cannot compete
+for the linked WhatsApp session.
 
 What `bash scripts/install.sh` does, so you can trust it:
 

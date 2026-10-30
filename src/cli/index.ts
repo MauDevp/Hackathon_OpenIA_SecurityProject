@@ -19,8 +19,8 @@ import {
   createSnapshot,
   SnapshotError,
 } from "../core/snapshot.js";
-import type { NotificationKind, NotificationStatus, NotificationTrigger } from "../notifications/contracts.js";
-import { kindForStatus } from "../notifications/contracts.js";
+import type { NotificationFailure, NotificationKind, NotificationStatus, NotificationTrigger } from "../notifications/contracts.js";
+import { kindForStatus, notificationFailureFromError } from "../notifications/contracts.js";
 import { eventFromAnalysis, eventFromReport } from "../notifications/formatter.js";
 import { deliverPendingNotifications, queueNotification } from "../notifications/outbox.js";
 import {
@@ -31,8 +31,8 @@ import {
 } from "../notifications/whatsapp.js";
 import { loadWhatsAppSettings, saveWhatsAppSettings } from "../notifications/settings.js";
 import { notificationStateDir } from "../notifications/state.js";
-import { addSchedule, listSchedules, removeSchedule, writeScheduleUnits } from "../schedule.js";
-import { setupBanner, setupError, setupResult, setupStep, setupSuccess, setupWarning } from "./presentation.js";
+import { addSchedule, listSchedules, removeSchedule, type ScheduleEntry, writeScheduleUnits } from "../schedule.js";
+import { setupBanner, setupResult, setupStep, setupSuccess, setupWarning } from "./presentation.js";
 
 const execFile = promisify(execFileCallback);
 const installationRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -250,15 +250,50 @@ function parseNotificationKinds(value: string | undefined): NotificationKind[] {
   return [...new Set(parsed)] as NotificationKind[];
 }
 
-async function notifyEvent(event: ReturnType<typeof eventFromAnalysis>): Promise<NotificationStatus> {
+interface NotificationAttempt {
+  status: NotificationStatus;
+  failure?: NotificationFailure;
+}
+
+function notificationFailureDetails(failure: NotificationFailure): string {
+  const details: Record<NotificationFailure["stage"], { where: string; reason: string }> = {
+    configuration: {
+      where: "configuración",
+      reason: "falta o no es válida la configuración local de WhatsApp.",
+    },
+    connection: {
+      where: "conexión",
+      reason: "la sesión vinculada no pudo conectarse a WhatsApp.",
+    },
+    recipient: {
+      where: "destinatario",
+      reason: "el número configurado no se encontró en WhatsApp.",
+    },
+    delivery: {
+      where: "envío",
+      reason: "WhatsApp no confirmó la entrega del mensaje.",
+    },
+  };
+  const detail = details[failure.stage];
+  return `Alertas de WhatsApp · dónde falló: ${detail.where} · motivo: ${detail.reason}`;
+}
+
+function writeNotificationResult(result: NotificationAttempt): void {
+  process.stdout.write(`notification: ${result.status}\n`);
+  if (result.failure) process.stdout.write(`${notificationFailureDetails(result.failure)}\n`);
+}
+
+async function notifyEvent(event: ReturnType<typeof eventFromAnalysis>): Promise<NotificationAttempt> {
   const queued = await queueNotification(event);
   try {
     const transport = createWhatsAppTransport(await whatsAppOptionsFromEnvironment());
     const deliveries = await deliverPendingNotifications(transport);
-    return deliveries.find((delivery) => delivery.dedupeKey === queued.dedupeKey)?.status ?? queued.status;
-  } catch {
+    const delivery = deliveries.find((item) => item.dedupeKey === queued.dedupeKey);
+    if (!delivery?.failure) return { status: delivery?.status ?? queued.status };
+    return { status: delivery.status, failure: delivery.failure };
+  } catch (error) {
     // Transport failure is intentionally decoupled from the local scan verdict.
-    return queued.status;
+    return { status: queued.status, failure: notificationFailureFromError(error) };
   }
 }
 
@@ -268,8 +303,8 @@ async function notifyAnalysis(
   ref: string,
   trigger: NotificationTrigger,
   kinds = defaultNotificationKinds(),
-): Promise<NotificationStatus> {
-  if (!kinds.includes(kindForStatus(result.status))) return "skipped";
+): Promise<NotificationAttempt> {
+  if (!kinds.includes(kindForStatus(result.status))) return { status: "skipped" };
   return notifyEvent(eventFromAnalysis(result, repositoryAlias(repository), ref, trigger));
 }
 
@@ -319,8 +354,8 @@ async function runNotify(argv: string[]): Promise<number> {
     process.stdout.write("notification: skipped\n");
     return 0;
   }
-  const status = await notifyEvent(eventFromReport(document, input.repository, input.ref, input.trigger));
-  process.stdout.write(`notification: ${status}\n`);
+  const notification = await notifyEvent(eventFromReport(document, input.repository, input.ref, input.trigger));
+  writeNotificationResult(notification);
   return 0;
 }
 
@@ -546,6 +581,7 @@ async function runOnboard(): Promise<number> {
     }
 
     process.stdout.write(setupStep(3, "Automatización", "Crea revisiones periódicas y una protección opcional antes de cada commit."));
+    let scheduledEntry: ScheduleEntry | undefined;
     const scheduleScan = enabled(await terminal.question("¿Crear y activar una revisión periódica? [S/n]: "), true);
     if (scheduleScan) {
       const every = (await terminal.question("Intervalo (por ejemplo 6h o 1d) [6h]: ")).trim() || "6h";
@@ -556,9 +592,12 @@ async function runOnboard(): Promise<number> {
         notify: configureWhatsApp ? "whatsapp" : "none",
         on: defaultNotificationKinds(),
       });
+      // A timer can run immediately when enabled. Keep it stopped until the
+      // first alert has used the linked WhatsApp session by itself.
+      await disableSchedule(entry.id);
       await writeScheduleUnits(entry, scheduledScript);
-      await enableSchedule(entry.id);
-      process.stdout.write(setupSuccess(`Revisión periódica activada cada ${entry.every}.`));
+      scheduledEntry = entry;
+      process.stdout.write(setupSuccess(`Revisión periódica preparada cada ${entry.every}; se activará después de la primera verificación.`));
     }
 
     const installPreCommit = enabled(await terminal.question("¿Instalar la protección pre-commit? [S/n]: "), true);
@@ -585,10 +624,22 @@ async function runOnboard(): Promise<number> {
     process.stdout.write(setupResult(firstScan.result.status, firstScan.result.findings.length));
     process.stdout.write(`\n${terminalSummary(firstScan.result, firstScan.output)}`);
     if (configureWhatsApp) {
-      const status = await notifyAnalysis(firstScan.result, repository, reference, "onboarding", ["pass", "findings", "incomplete"]);
-      process.stdout.write(status === "sent"
+      const notification = await notifyAnalysis(firstScan.result, repository, reference, "onboarding", ["pass", "findings", "incomplete"]);
+      process.stdout.write(notification.status === "sent"
         ? setupSuccess("Configuración completada y resumen de la primera verificación enviados por WhatsApp.")
-        : setupWarning(`No se pudo enviar el resumen de configuración y primera verificación: ${status}.`));
+        : setupWarning([
+          `No se pudo enviar el resumen de configuración y primera verificación: ${notification.status}.`,
+          notification.failure ? notificationFailureDetails(notification.failure) : "El mensaje quedó en cola y se reintentará en la siguiente revisión.",
+        ].join(" ")));
+    }
+    if (scheduledEntry) {
+      try {
+        await enableSchedule(scheduledEntry.id);
+        process.stdout.write(setupSuccess(`Revisión periódica activada cada ${scheduledEntry.every}.`));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "No se pudo activar la revisión periódica.";
+        process.stdout.write(setupWarning(`Programación creada, pero no activada · ${message}`));
+      }
     }
 
     process.stdout.write(`\n${setupSuccess("Configuración terminada. Tu repositorio ya tiene una primera línea de defensa.")}`);
@@ -599,6 +650,7 @@ async function runOnboard(): Promise<number> {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv.length === 0) return 0;
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
     process.stdout.write(`${usage()}\n`);
     return 0;
@@ -610,14 +662,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       const args = parseArguments(argv);
       const { result, output } = await executeScan(args);
       process.stdout.write(terminalSummary(result, output));
-      if (args.notify) process.stdout.write(`notification: ${await notifyAnalysis(result, args.repo, args.ref, "manual", args.notifyOn)}\n`);
+      if (args.notify) writeNotificationResult(await notifyAnalysis(result, args.repo, args.ref, "manual", args.notifyOn));
       return result.exitCode;
     }
     if (argv[0] === "check-staged") {
       const args = parseCheckStagedArguments(argv);
       const { result, output } = await executeCheckStaged(args);
       process.stdout.write(terminalSummary(result, output));
-      if (args.notify) process.stdout.write(`notification: ${await notifyAnalysis(result, args.repo, "INDEX", "pre_commit", args.notifyOn)}\n`);
+      if (args.notify) writeNotificationResult(await notifyAnalysis(result, args.repo, "INDEX", "pre_commit", args.notifyOn));
       return result.exitCode;
     }
     if (argv[0] === "onboard") return await runOnboard();
@@ -634,6 +686,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 function shouldOfferNextActionMenu(argv: string[]): boolean {
+  if (argv.length === 0) return true;
   return argv.length === 1 && ["onboard", "--login", "--logout", "--help", "-h"].includes(argv[0] ?? "");
 }
 

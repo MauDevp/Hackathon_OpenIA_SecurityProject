@@ -4,7 +4,7 @@ import { join } from "node:path";
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, type ConnectionState, type WASocket } from "@whiskeysockets/baileys";
 import QRCode from "qrcode-terminal";
 
-import type { NotificationTransport } from "./contracts.js";
+import type { NotificationFailureStage, NotificationTransport } from "./contracts.js";
 import { formatWhatsAppMessage } from "./formatter.js";
 import { loadWhatsAppSettings, normalizeWhatsAppRecipient } from "./settings.js";
 import { notificationStateDir } from "./state.js";
@@ -26,9 +26,12 @@ console.warn = (...values: unknown[]) => {
 };
 
 export class WhatsAppConfigurationError extends Error {
-  constructor(message: string) {
+  readonly notificationFailure: { stage: NotificationFailureStage };
+
+  constructor(message: string, stage: NotificationFailureStage = "configuration") {
     super(message);
     this.name = "WhatsAppConfigurationError";
+    this.notificationFailure = { stage };
   }
 }
 
@@ -92,7 +95,7 @@ function recipientPhone(recipient: string): string {
   try {
     return normalizeWhatsAppRecipient(recipient);
   } catch {
-    throw new WhatsAppConfigurationError("The WhatsApp recipient must be a phone number in international E.164 digits.");
+    throw new WhatsAppConfigurationError("The WhatsApp recipient must be a phone number in international E.164 digits.", "configuration");
   }
 }
 
@@ -112,7 +115,7 @@ async function resolveRecipient(socket: WASocket, recipient: string): Promise<st
     const destination = matches?.find((item) => item.exists);
     if (destination) return destination.jid;
   }
-  throw new WhatsAppConfigurationError("The configured WhatsApp recipient could not be found.");
+  throw new WhatsAppConfigurationError("The configured WhatsApp recipient could not be found.", "recipient");
 }
 
 /** Reads only the recipient; Baileys credentials come from the QR-linked local session. */
@@ -121,6 +124,7 @@ export async function whatsAppOptionsFromEnvironment(environment: NodeJS.Process
   if (!recipient) {
     throw new WhatsAppConfigurationError(
       "Run 'guardia onboard' or set DMSECURITY_WHATSAPP_RECIPIENT to the international destination number, then run 'guardia whatsapp login' to link a phone by QR.",
+      "configuration",
     );
   }
   return { recipient };
@@ -188,7 +192,7 @@ function waitForOpen(
       else if (result) resolve(result);
     };
     const timeout = setTimeout(
-      () => finish(undefined, new WhatsAppConfigurationError("Timed out waiting for WhatsApp. Run 'guardia whatsapp login' and scan a current QR code.")),
+      () => finish(undefined, new WhatsAppConfigurationError("Timed out waiting for WhatsApp. Run 'guardia whatsapp login' and scan a current QR code.", "connection")),
       timeoutMs,
     );
     socket.ev.on("connection.update", (update) => {
@@ -196,7 +200,7 @@ function waitForOpen(
       if (update.connection === "open") finish("open");
       if (update.connection === "close") {
         if (disconnectStatus(update) === DisconnectReason.restartRequired) finish("restart");
-        else finish(undefined, new WhatsAppConfigurationError(connectionMessage(update)));
+        else finish(undefined, new WhatsAppConfigurationError(connectionMessage(update), "connection"));
       }
     });
   });
@@ -226,10 +230,11 @@ async function connect(
       await closeSocket(connection.socket);
     } catch (error) {
       await closeSocket(connection.socket);
-      throw error;
+      if (error instanceof WhatsAppConfigurationError) throw error;
+      throw new WhatsAppConfigurationError("Could not connect to WhatsApp. Check the linked device and try again.", "connection");
     }
   }
-  throw new WhatsAppConfigurationError("WhatsApp requested repeated connection restarts. Run 'guardia whatsapp login' again.");
+  throw new WhatsAppConfigurationError("WhatsApp requested repeated connection restarts. Run 'guardia whatsapp login' again.", "connection");
 }
 
 /** Opens a QR login session. The caller must scan it in WhatsApp > Linked devices. */
@@ -259,7 +264,12 @@ export function createWhatsAppTransport(options: WhatsAppOptions): NotificationT
       const connection = await connect(options);
       try {
         const jid = await resolveRecipient(connection.socket, options.recipient);
-        const message = await connection.socket.sendMessage(jid, { text: formatWhatsAppMessage(event) });
+        let message: Awaited<ReturnType<WASocket["sendMessage"]>>;
+        try {
+          message = await connection.socket.sendMessage(jid, { text: formatWhatsAppMessage(event) });
+        } catch {
+          throw new WhatsAppConfigurationError("WhatsApp did not confirm the message delivery.", "delivery");
+        }
         const id = message?.key.id;
         return { providerMessageId: typeof id === "string" ? id.slice(0, 128) : "accepted" };
       } finally {

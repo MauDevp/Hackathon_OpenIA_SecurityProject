@@ -80,8 +80,28 @@ test("a provider failure is retried without persisting its raw error", async () 
       },
     }, { stateDir, now: new Date("2026-01-01T00:00:00Z") });
     assert.equal(delivery[0]?.status, "queued");
+    assert.equal(delivery[0]?.failure?.stage, "delivery");
     const pending = await readFile(join(stateDir, "outbox", "pending", `${delivery[0]?.dedupeKey}.json`), "utf8");
     assert.match(pending, /delivery failed/);
+    assert.doesNotMatch(pending, new RegExp(SECRET));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a transport can report a safe failure stage without persisting provider details", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "dmsecurity-outbox-"));
+  try {
+    const event = eventFromAnalysis(findingsResult(), "api", "HEAD", "scheduled");
+    await queueNotification(event, { stateDir, now: new Date("2026-01-01T00:00:00Z") });
+    const delivery = await deliverPendingNotifications({
+      async send() {
+        throw Object.assign(new Error(SECRET), { notificationFailure: { stage: "recipient" } });
+      },
+    }, { stateDir, now: new Date("2026-01-01T00:00:00Z") });
+    assert.equal(delivery[0]?.failure?.stage, "recipient");
+    const pending = await readFile(join(stateDir, "outbox", "pending", `${delivery[0]?.dedupeKey}.json`), "utf8");
+    assert.match(pending, /"lastFailure":\{"stage":"recipient"\}/);
     assert.doesNotMatch(pending, new RegExp(SECRET));
   } finally {
     await rm(stateDir, { recursive: true, force: true });

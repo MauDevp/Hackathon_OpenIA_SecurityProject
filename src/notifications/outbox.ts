@@ -2,7 +2,14 @@ import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/pro
 import { constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 
-import type { NotificationEvent, NotificationStatus, NotificationTransport, QueuedNotification } from "./contracts.js";
+import {
+  notificationFailureFromError,
+  type NotificationEvent,
+  type NotificationFailure,
+  type NotificationStatus,
+  type NotificationTransport,
+  type QueuedNotification,
+} from "./contracts.js";
 import { notificationDedupeKey } from "./formatter.js";
 import { notificationStateDir } from "./state.js";
 
@@ -20,6 +27,7 @@ export interface QueueResult {
 
 export interface DeliveryResult extends QueueResult {
   attempts: number;
+  failure?: NotificationFailure;
 }
 
 function directories(options: OutboxOptions): { root: string; pending: string; sent: string; failed: string } {
@@ -117,16 +125,17 @@ export async function deliverPendingNotifications(
       await transport.send(item.event);
       await rename(file, join(paths.sent, entry.name));
       results.push({ status: "sent", dedupeKey: item.dedupeKey, attempts: item.attempts + 1 });
-    } catch {
+    } catch (error) {
       const attempts = item.attempts + 1;
+      const failure = notificationFailureFromError(error);
       if (attempts >= MAX_ATTEMPTS) {
-        await writeFile(file, `${JSON.stringify({ ...item, attempts, lastError: "delivery failed" })}\n`, { encoding: "utf8", mode: 0o600 });
+        await writeFile(file, `${JSON.stringify({ ...item, attempts, lastError: "delivery failed", lastFailure: failure })}\n`, { encoding: "utf8", mode: 0o600 });
         await rename(file, join(paths.failed, entry.name));
-        results.push({ status: "failed", dedupeKey: item.dedupeKey, attempts });
+        results.push({ status: "failed", dedupeKey: item.dedupeKey, attempts, failure });
       } else {
         const nextAttemptAt = new Date(now.getTime() + delayForAttempt(attempts)).toISOString();
-        await writeFile(file, `${JSON.stringify({ ...item, attempts, nextAttemptAt, lastError: "delivery failed" })}\n`, { encoding: "utf8", mode: 0o600 });
-        results.push({ status: "queued", dedupeKey: item.dedupeKey, attempts });
+        await writeFile(file, `${JSON.stringify({ ...item, attempts, nextAttemptAt, lastError: "delivery failed", lastFailure: failure })}\n`, { encoding: "utf8", mode: 0o600 });
+        results.push({ status: "queued", dedupeKey: item.dedupeKey, attempts, failure });
       }
     }
   }

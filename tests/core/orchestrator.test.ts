@@ -62,14 +62,16 @@ test("missing or failed coverage wins over findings and preserves them", async (
 });
 
 test("a scanner error makes the result incomplete", async () => {
+  const failed = { ...scanner("osv", "error"), error: "offline database could not be read" };
   const result = await orchestrate({
     snapshot,
-    scanAll: adapters([scanner("osv", "error"), scanner("gitleaks", "ok")]),
+    scanAll: adapters([failed, scanner("gitleaks", "ok")]),
     strictOffline: false,
     isolation: "not_requested",
   });
   assert.equal(result.status, "INCOMPLETE");
   assert.equal(result.exitCode, 2);
+  assert.match(terminalSummary(result, "/tmp/report.json"), /fallo: escáner osv · motivo: offline database could not be read/);
 });
 
 test("strict offline remains incomplete until isolation is verified", async () => {
