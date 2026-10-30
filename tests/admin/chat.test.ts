@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -142,11 +142,13 @@ test("administrator chat service uses the local Node entrypoint and restarts saf
   try {
     const unit = await writeAdminChatUnit("/opt/dmsecurity/dist/cli/index.js", "/opt/dmsecurity/node/bin/node", {
       DMSECURITY_SYSTEMD_USER_DIR: directory,
+      PNPM_HOME: "/opt/pnpm",
     });
+    const localBin = join(homedir(), ".local", "bin");
     const content = await readFile(unit, "utf8");
     assert.match(content, /ExecStart="\/opt\/dmsecurity\/node\/bin\/node" "\/opt\/dmsecurity\/dist\/cli\/index\.js" admin-chat/);
     assert.match(content, /Restart=on-failure/);
-    assert.match(content, /Environment=PATH="\/opt\/dmsecurity\/node\/bin:\/home\/diego-martell\/\.local\/bin:\/home\/diego-martell\/\.local\/share\/pnpm:\/usr\/local\/bin:\/usr\/bin:\/bin"/);
+    assert.ok(content.includes(`Environment=PATH="/opt/dmsecurity/node/bin:${localBin}:/opt/pnpm:/usr/local/bin:/usr/bin:/bin"`));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
