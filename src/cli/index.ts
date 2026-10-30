@@ -633,11 +633,62 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 }
 
+function shouldOfferNextActionMenu(argv: string[]): boolean {
+  return argv.length === 1 && ["onboard", "--login", "--logout", "--help", "-h"].includes(argv[0] ?? "");
+}
+
+/** Presents follow-up actions only to a person at an interactive terminal. */
+async function offerNextActionMenu(): Promise<void> {
+  const actions: Record<string, string[]> = {
+    "1": ["--login"],
+    "2": ["--logout"],
+    "3": ["onboard"],
+    "4": ["--help"],
+  };
+
+  while (true) {
+    process.stdout.write([
+      "",
+      "¿Qué deseas hacer ahora?",
+      "  1. dmsecurity --login",
+      "  2. dmsecurity --logout",
+      "  3. dmsecurity onboard",
+      "  4. dmsecurity --help",
+      "  5. Salir",
+    ].join("\n") + "\n");
+    const terminal = createInterface({ input: process.stdin, output: process.stdout });
+    let choice: string;
+    try {
+      choice = (await terminal.question("Elige una opción [5]: ")).trim() || "5";
+    } catch {
+      return;
+    } finally {
+      terminal.close();
+    }
+
+    if (choice === "5") {
+      process.stdout.write("Hasta pronto.\n");
+      return;
+    }
+    const argv = actions[choice];
+    if (!argv) {
+      process.stdout.write("Opción inválida. Escribe un número del 1 al 5.\n");
+      continue;
+    }
+    const exitCode = await main(argv);
+    if (exitCode !== 0) process.stdout.write("La acción terminó con un error. Puedes intentar otra opción.\n");
+  }
+}
+
 const invokedPath = process.argv[1];
 const invokedAsProgram = invokedPath !== undefined
   && import.meta.url === pathToFileURL(realpathSync(invokedPath)).href;
 if (invokedAsProgram) {
-  void main().then((exitCode) => {
+  const invocation = process.argv.slice(2);
+  void main(invocation).then(async (exitCode) => {
+    if (exitCode === 0 && process.stdin.isTTY && process.stdout.isTTY && shouldOfferNextActionMenu(invocation)) {
+      await offerNextActionMenu();
+    }
     process.exitCode = exitCode;
   });
 }

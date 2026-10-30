@@ -112,6 +112,10 @@ dmsecurity --logout  # remove the local linked-device session
 dmsecurity onboard   # guided repository, alert and hook setup
 ```
 
+When one of those interactive commands finishes, DMsecurity shows a small
+numbered menu with those same actions and `Salir`. Scans, Git hooks and
+scheduled jobs never show it, so they remain automation-friendly.
+
 The setup assistant asks before linking WhatsApp, enabling a systemd user timer
 or installing a Git pre-commit hook. It never overwrites an existing hook.
 Your WhatsApp recipient is stored privately in
