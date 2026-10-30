@@ -49,7 +49,7 @@ summary="$(cd "$ROOT" && "$NODE_BIN" dist/cli/index.js scan --repo "$repo" --ref
 code=$?
 printf '%s\n' "$summary"
 
-status="$(printf '%s\n' "$summary" | sed -n 's/^guardia: \([A-Z]*\).*/\1/p' | head -1)"
+status="$(printf '%s\n' "$summary" | sed -n 's/^DMsecurity: \([A-Z]*\).*/\1/p' | head -1)"
 findings="$(printf '%s\n' "$summary" | sed -n 's/^findings: \([0-9]*\)/\1/p' | head -1)"
 commit="$(printf '%s\n' "$summary" | sed -n 's/^commit: \([0-9a-f]\{7\}\).*/\1/p' | head -1)"
 [ -n "$status" ] || status="ERROR"

@@ -1,17 +1,43 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { chmod, lstat, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { scanAll } from "../adapters/index.js";
+import { scanOsv } from "../adapters/osv.js";
 import type { AnalysisResult, ScanAll } from "../contracts.js";
+import {
+  adminChatMenu,
+  adminDetailMessage,
+  adminReviewMessage,
+  acquireAdminChatLock,
+  clearAdminChatActive,
+  clearPendingDependencyRepair,
+  clearPendingPnpmInstall,
+  createPendingDependencyRepair,
+  createPendingPnpmInstall,
+  dependencyRepairArguments,
+  dependencyRepairProposalMessage,
+  isAdminChatActive,
+  loadPendingDependencyRepair,
+  loadPendingPnpmInstall,
+  packageManagerForLockfiles,
+  parseAdminCommand,
+  pnpmInstallProposalMessage,
+  pnpmVersionFromPackageManager,
+  releaseAdminChatLock,
+  unknownAdminCommandMessage,
+} from "../admin/chat.js";
+import { disableAdminChatService, enableAdminChatService, writeAdminChatUnit } from "../admin/service.js";
 import { orchestrate, snapshotFailure } from "../core/orchestrator.js";
-import { type GuardiaReport, serializeReport, terminalSummary } from "../core/report.js";
+import { redactSecrets, type GuardiaReport, serializeReport, terminalSummary } from "../core/report.js";
 import {
   assertOutputOutsideRepository,
   cleanupSnapshot,
@@ -26,13 +52,24 @@ import { deliverPendingNotifications, queueNotification } from "../notifications
 import {
   createWhatsAppTransport,
   loginWhatsApp,
+  openWhatsAppAdminChat,
   resetWhatsAppSession,
   whatsAppOptionsFromEnvironment,
 } from "../notifications/whatsapp.js";
-import { loadWhatsAppSettings, saveWhatsAppSettings } from "../notifications/settings.js";
+import { loadSecurityTarget, loadWhatsAppSettings, saveSecurityTarget, saveWhatsAppSettings } from "../notifications/settings.js";
 import { notificationStateDir } from "../notifications/state.js";
 import { addSchedule, listSchedules, removeSchedule, type ScheduleEntry, writeScheduleUnits } from "../schedule.js";
-import { setupBanner, setupResult, setupStep, setupSuccess, setupWarning } from "./presentation.js";
+import {
+  actionMenu,
+  commandReference,
+  detailedSecurityReport,
+  securityCheckHeader,
+  setupBanner,
+  setupResult,
+  setupStep,
+  setupSuccess,
+  setupWarning,
+} from "./presentation.js";
 
 const execFile = promisify(execFileCallback);
 const installationRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -63,16 +100,19 @@ class CliError extends Error {
 
 function usage(): string {
   return [
-    "Usage:",
-    "  guardia scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]",
-    "  guardia check-staged --repo <path> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]",
-    "  guardia onboard",
+    "Uso:",
+    "  dmsecurity scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]",
+    "  dmsecurity check-staged --repo <path> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]",
+    "  dmsecurity onboard",
     "  dmsecurity --login | --logout",
-    "  guardia whatsapp login | reset | logout",
-    "  guardia notify --report <report.json> [--repo-alias <name>] [--ref <ref>] [--trigger scheduled|pre_commit|manual]",
-    "  guardia schedule add --repo <path> --ref <git-ref> --every <30m|6h|1d> --notify <whatsapp|none> [--on findings,incomplete]",
-    "  guardia schedule list | remove --id <id>",
-    "  guardia hook install --repo <path> [--mode warn|block] [--notify none|whatsapp] [--on pass,findings,incomplete]",
+    "  dmsecurity comandos",
+    "  dmsecurity detailed-check",
+    "  dmsecurity admin-chat [install|stop]",
+    "  dmsecurity whatsapp login | reset | logout",
+    "  dmsecurity notify --report <report.json> [--repo-alias <name>] [--ref <ref>] [--trigger scheduled|pre_commit|manual]",
+    "  dmsecurity schedule add --repo <path> --ref <git-ref> --every <30m|6h|1d> --notify <whatsapp|none> [--on findings,incomplete]",
+    "  dmsecurity schedule list | remove --id <id>",
+    "  dmsecurity hook install --repo <path> [--mode warn|block] [--notify none|whatsapp] [--on pass,findings,incomplete]",
     "",
     "Report output must be outside the repository being analyzed.",
   ].join("\n");
@@ -285,6 +325,11 @@ function writeNotificationResult(result: NotificationAttempt): void {
 
 async function notifyEvent(event: ReturnType<typeof eventFromAnalysis>): Promise<NotificationAttempt> {
   const queued = await queueNotification(event);
+  // The administrator chat owns the QR-linked socket while active. Let it
+  // drain the private outbox instead of opening a competing WhatsApp session.
+  if (process.env.DMSECURITY_WHATSAPP_QUEUE_ONLY === "1" || await isAdminChatActive()) {
+    return { status: queued.status };
+  }
   try {
     const transport = createWhatsAppTransport(await whatsAppOptionsFromEnvironment());
     const deliveries = await deliverPendingNotifications(transport);
@@ -364,9 +409,15 @@ async function runWhatsApp(argv: string[]): Promise<number> {
     throw new CliError("Expected 'whatsapp login', 'whatsapp logout' or 'whatsapp reset'.");
   }
   if (argv[1] === "reset" || argv[1] === "logout") {
+    if (await isAdminChatActive()) {
+      throw new CliError("Detén primero el chat de administrador con 'dmsecurity admin-chat stop' para cerrar la sesión de WhatsApp de forma segura.");
+    }
     await resetWhatsAppSession();
     process.stdout.write("Sesión local de WhatsApp cerrada. Elimina también el dispositivo DMsecurity desde WhatsApp en el celular.\n");
     return 0;
+  }
+  if (await isAdminChatActive()) {
+    throw new CliError("El chat de administrador ya usa la sesión de WhatsApp. Deténlo con 'dmsecurity admin-chat stop' antes de volver a vincularla.");
   }
   await loginWhatsApp();
   process.stdout.write("WhatsApp linked.\n");
@@ -532,6 +583,650 @@ function useInstalledScannersForOnboarding(): void {
   process.env.OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY ??= join(guardiaDirectory, "osv-db");
 }
 
+function interactiveCheckReportPath(): string {
+  return join(notificationStateDir(), "interactive-checks", `detailed-${Date.now()}.json`);
+}
+
+async function interactiveSecurityTarget(): Promise<{ repository: string; reference: string }> {
+  const saved = await loadSecurityTarget();
+  const fallback = saved ?? [...(await listSchedules())].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  if (!fallback) {
+    throw new CliError("No hay un repositorio configurado para revisar. Ejecuta 'dmsecurity onboard' primero.");
+  }
+  const repository = await validateGitRepository(fallback.repository);
+  await validateReference(repository, fallback.ref);
+  return { repository, reference: fallback.ref };
+}
+
+async function withActivity<T>(message: string, action: () => Promise<T>): Promise<T> {
+  if (!process.stdout.isTTY) {
+    process.stdout.write(`▶ ${message}\n`);
+    return action();
+  }
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let frame = 0;
+  const render = () => process.stdout.write(`\r\x1B[2K${frames[frame] ?? "·"} ${message}`);
+  render();
+  const timer = setInterval(() => {
+    frame = (frame + 1) % frames.length;
+    render();
+  }, 90);
+  try {
+    const result = await action();
+    clearInterval(timer);
+    process.stdout.write(`\r\x1B[2K✓ ${message} terminado.\n`);
+    return result;
+  } catch (error) {
+    clearInterval(timer);
+    process.stdout.write(`\r\x1B[2K✕ ${message} no pudo terminar.\n`);
+    throw error;
+  }
+}
+
+async function runDetailedSecurityCheck(): Promise<number> {
+  const target = await interactiveSecurityTarget();
+  process.stdout.write(securityCheckHeader("detallada", repositoryAlias(target.repository), target.reference));
+  useInstalledScannersForOnboarding();
+  const scan = await withActivity(
+    "Revisando dependencias vulnerables, secretos expuestos y cobertura",
+    () => executeScan({
+      repo: target.repository,
+      ref: target.reference,
+      out: interactiveCheckReportPath(),
+      strictOffline: false,
+    }),
+  );
+  process.stdout.write(terminalSummary(scan.result, scan.output));
+  process.stdout.write(detailedSecurityReport(scan.result));
+  return 0;
+}
+
+function adminChatReportPath(kind: "review" | "repair"): string {
+  return join(notificationStateDir(), "admin-chat", `${kind}-${Date.now()}.json`);
+}
+
+async function runAdminReview(): Promise<{ result: AnalysisResult; repository: string; reference: string }> {
+  const target = await interactiveSecurityTarget();
+  useInstalledScannersForOnboarding();
+  const scan = await executeScan({
+    repo: target.repository,
+    ref: target.reference,
+    out: adminChatReportPath("review"),
+    strictOffline: false,
+  });
+  return { result: scan.result, repository: target.repository, reference: target.reference };
+}
+
+async function workingTreeIsClean(repository: string): Promise<boolean> {
+  try {
+    const output = await execFile("git", ["-C", repository, "status", "--porcelain"], { encoding: "utf8", maxBuffer: 64 * 1024 });
+    return output.stdout.trim() === "";
+  } catch {
+    throw new CliError("No se pudo comprobar si el árbol de trabajo está limpio.");
+  }
+}
+
+async function resolveGitCommit(repository: string, reference: string): Promise<string> {
+  try {
+    const output = await execFile("git", ["-C", repository, "rev-parse", "--verify", "--end-of-options", `${reference}^{commit}`], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    });
+    const commit = output.stdout.trim();
+    if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error("invalid commit");
+    return commit;
+  } catch {
+    throw new CliError("No se pudo verificar el commit actual del repositorio antes de reparar.");
+  }
+}
+
+async function lockfileDigest(repository: string, lockfile: string): Promise<string> {
+  if (!lockfile || lockfile.includes("\0") || isAbsolute(lockfile)) {
+    throw new CliError("El lockfile de la propuesta no es seguro.");
+  }
+  const root = await realpath(repository);
+  const candidate = resolve(root, lockfile);
+  const between = relative(root, candidate);
+  if (between === "" || between === ".." || between.startsWith(`..${sep}`) || isAbsolute(between)) {
+    throw new CliError("El lockfile de la propuesta queda fuera del repositorio.");
+  }
+  let file: Awaited<ReturnType<typeof lstat>>;
+  try {
+    file = await lstat(candidate);
+  } catch {
+    throw new CliError("El lockfile propuesto ya no existe.");
+  }
+  if (!file.isFile() || file.isSymbolicLink() || file.size > 64 * 1024 * 1024) {
+    throw new CliError("El lockfile propuesto no es un archivo regular seguro.");
+  }
+  return createHash("sha256").update(await readFile(candidate)).digest("hex");
+}
+
+function userLocalBin(): string {
+  return join(homedir(), ".local", "bin");
+}
+
+function localPnpmBinary(): string {
+  return join(userLocalBin(), "pnpm");
+}
+
+function addUserLocalBinToPath(): void {
+  const directory = userLocalBin();
+  const current = process.env.PATH ?? "";
+  if (!current.split(":").includes(directory)) process.env.PATH = `${directory}:${current}`;
+}
+
+/** Prefer the fixed per-user pnpm location, so an existing service can use it
+ * immediately after an approved bootstrap without waiting for a restart. */
+async function packageManagerCommand(packageManager: "npm" | "pnpm"): Promise<string | null> {
+  const candidates = packageManager === "pnpm" ? [localPnpmBinary(), "pnpm"] : ["npm"];
+  for (const candidate of candidates) {
+    try {
+      await execFile(candidate, ["--version"], { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024, windowsHide: true });
+      return candidate;
+    } catch {
+      // Try the next fixed, local candidate.
+    }
+  }
+  return null;
+}
+
+async function installedPackageManagerVersion(command: string): Promise<string | null> {
+  try {
+    const output = await execFile(command, ["--version"], { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024, windowsHide: true });
+    const version = output.stdout.trim().split(/\s+/, 1)[0] ?? "";
+    return /^\d+\.\d+\.\d+$/.test(version) ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+async function packageManagerAvailable(packageManager: "npm" | "pnpm"): Promise<boolean> {
+  return (await packageManagerCommand(packageManager)) !== null;
+}
+
+async function packageManagerVersionFromRepository(repository: string): Promise<string | null> {
+  try {
+    // Reuse the repository-bound file validation before parsing project data.
+    // In particular, package.json may not be a symlink outside the target.
+    await lockfileDigest(repository, "package.json");
+    const packageJson = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as { packageManager?: unknown };
+    return pnpmVersionFromPackageManager(packageJson.packageManager);
+  } catch {
+    return null;
+  }
+}
+
+/** npm arguments are entirely fixed in code; WhatsApp never contributes text. */
+function pnpmInstallationArguments(version: string): string[] {
+  return [
+    "install",
+    "--global",
+    "--prefix", join(homedir(), ".local"),
+    `pnpm@${version}`,
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--registry=https://registry.npmjs.org",
+  ];
+}
+
+async function applyConfirmedPnpmInstall(
+  proposal: NonNullable<Awaited<ReturnType<typeof loadPendingPnpmInstall>>>,
+): Promise<string> {
+  const currentTarget = await interactiveSecurityTarget();
+  if (currentTarget.repository !== proposal.repository || currentTarget.reference !== proposal.ref) {
+    return [
+      "DMsecurity 🛡️ · instalación cancelada",
+      "El repositorio o la referencia configurados cambiaron desde la propuesta.",
+      "Solicita INSTALAR PNPM de nuevo para revisar el objetivo actual.",
+    ].join("\n");
+  }
+  const [headCommit, referenceCommit] = await Promise.all([
+    resolveGitCommit(proposal.repository, "HEAD"),
+    resolveGitCommit(proposal.repository, proposal.ref),
+  ]);
+  if (headCommit !== proposal.commit || referenceCommit !== proposal.commit) {
+    return [
+      "DMsecurity 🛡️ · instalación cancelada",
+      "La rama activa o la referencia revisada cambió desde la propuesta.",
+      "Solicita INSTALAR PNPM otra vez para no instalar una herramienta para un objetivo distinto.",
+    ].join("\n");
+  }
+  if (await lockfileDigest(proposal.repository, "package.json") !== proposal.packageJsonSha256) {
+    return [
+      "DMsecurity 🛡️ · instalación cancelada",
+      "package.json cambió desde la propuesta. Solicita INSTALAR PNPM de nuevo para verificar la versión requerida.",
+    ].join("\n");
+  }
+  const expectedVersion = await packageManagerVersionFromRepository(proposal.repository);
+  if (expectedVersion !== proposal.pnpmVersion) {
+    return [
+      "DMsecurity 🛡️ · instalación cancelada",
+      "El repositorio ya no declara la misma versión de pnpm. Solicita una nueva propuesta.",
+    ].join("\n");
+  }
+  const npm = await packageManagerCommand("npm");
+  if (!npm) {
+    return [
+      "DMsecurity 🛡️ · instalación no aplicada",
+      "npm no está disponible en este equipo, por lo que no puedo instalar pnpm de forma segura.",
+      "Instala o repara Node.js/npm localmente y vuelve a solicitar INSTALAR PNPM.",
+    ].join("\n");
+  }
+  try {
+    await execFile(npm, pnpmInstallationArguments(proposal.pnpmVersion), {
+      cwd: installationRoot,
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        NPM_CONFIG_IGNORE_SCRIPTS: "true",
+        NPM_CONFIG_AUDIT: "false",
+        NPM_CONFIG_FUND: "false",
+        NPM_CONFIG_REGISTRY: "https://registry.npmjs.org",
+      },
+    });
+  } catch {
+    return [
+      "DMsecurity 🛡️ · instalación no aplicada",
+      `No se pudo instalar pnpm@${proposal.pnpmVersion} desde el registro oficial de npm.`,
+      "Comprueba la conexión y permisos de ~/.local; no se expone la salida de npm por WhatsApp.",
+    ].join("\n");
+  }
+  addUserLocalBinToPath();
+  const installedVersion = await installedPackageManagerVersion(localPnpmBinary());
+  if (installedVersion !== proposal.pnpmVersion) {
+    return [
+      "DMsecurity 🛡️ · instalación incompleta",
+      `npm terminó, pero ~/.local/bin/pnpm no informó la versión esperada (${proposal.pnpmVersion}).`,
+      "No se habilitará la reparación desde WhatsApp hasta que verifiques la instalación local.",
+    ].join("\n");
+  }
+  await clearPendingPnpmInstall();
+  return [
+    "DMsecurity 🛡️ · PNPM instalado",
+    `Versión: pnpm@${proposal.pnpmVersion} · ubicación: ~/.local/bin/pnpm`,
+    "No se instalaron dependencias del proyecto ni se ejecutaron scripts.",
+    "Ya puedes responder REPARAR DEPENDENCIAS; seguirá requiriendo una propuesta y una confirmación independiente.",
+  ].join("\n");
+}
+
+async function applyConfirmedDependencyRepair(
+  proposal: NonNullable<Awaited<ReturnType<typeof loadPendingDependencyRepair>>>,
+): Promise<string> {
+  const currentTarget = await interactiveSecurityTarget();
+  if (currentTarget.repository !== proposal.repository || currentTarget.reference !== proposal.ref) {
+    return [
+      "DMsecurity 🛡️ · reparación cancelada",
+      "El repositorio o la referencia configurados cambiaron desde la propuesta.",
+      "Solicita REPARAR DEPENDENCIAS de nuevo para revisar el objetivo actual.",
+    ].join("\n");
+  }
+  const [headCommit, referenceCommit] = await Promise.all([
+    resolveGitCommit(proposal.repository, "HEAD"),
+    resolveGitCommit(proposal.repository, proposal.ref),
+  ]);
+  if (headCommit !== proposal.commit || referenceCommit !== proposal.commit) {
+    return [
+      "DMsecurity 🛡️ · reparación cancelada",
+      "La rama activa o la referencia revisada cambió desde la propuesta; no modificaré un objetivo distinto.",
+      "Solicita REPARAR DEPENDENCIAS de nuevo para revisar el commit actual.",
+    ].join("\n");
+  }
+  if (!await workingTreeIsClean(proposal.repository)) {
+    return [
+      "DMsecurity 🛡️ · reparación no aplicada",
+      "El repositorio tiene cambios locales. Revísalos o guárdalos antes de modificar dependencias.",
+      "La propuesta sigue pendiente mientras no caduque; usa CANCELAR para eliminarla.",
+    ].join("\n");
+  }
+  if (await lockfileDigest(proposal.repository, proposal.lockfile) !== proposal.lockfileSha256) {
+    return [
+      "DMsecurity 🛡️ · reparación cancelada",
+      "El lockfile cambió desde la revisión. Solicita una propuesta nueva para no reparar contenido distinto.",
+    ].join("\n");
+  }
+  const packageManager = await packageManagerCommand(proposal.packageManager);
+  if (!packageManager) {
+    return [
+      "DMsecurity 🛡️ · reparación no aplicada",
+      `${proposal.packageManager} ya no está disponible para el servicio local.`,
+      proposal.packageManager === "pnpm"
+        ? "Responde INSTALAR PNPM para preparar una instalación limitada y confirmada."
+        : "Instala o repara npm localmente y vuelve a solicitar REPARAR DEPENDENCIAS.",
+    ].join("\n");
+  }
+  try {
+    await execFile(packageManager, dependencyRepairArguments(proposal.packageManager), {
+      cwd: proposal.repository,
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+  } catch {
+    return [
+      "DMsecurity 🛡️ · reparación no aplicada",
+      `No se pudo completar la actualización segura con ${proposal.packageManager}.`,
+      "Comprueba que el gestor esté instalado y revisa sus dependencias localmente; no se expone la salida del gestor por WhatsApp.",
+    ].join("\n");
+  }
+
+  // Only the updated lockfile is rechecked against the local advisory DB. It
+  // deliberately does not execute project test scripts received from a chat.
+  useInstalledScannersForOnboarding();
+  const verification = await scanOsv({
+    snapshotDir: proposal.repository,
+    lockfiles: [proposal.lockfile],
+  });
+  const vulnerabilities = verification.findings.length;
+  await clearPendingDependencyRepair();
+  return [
+    "DMsecurity 🛡️ · reparación de dependencias terminada",
+    `Repositorio: ${repositoryAlias(proposal.repository)} · lockfile: ${proposal.lockfile}`,
+    `Verificación posterior: OSV ${verification.status} · vulnerabilidades detectadas: ${vulnerabilities}.`,
+    vulnerabilities === 0 && verification.status === "ok"
+      ? "La base local no detectó vulnerabilidades en el lockfile actualizado. Revisa git diff y ejecuta tus pruebas locales antes de hacer commit."
+      : "Aún hay hallazgos o cobertura pendiente. Usa DETALLE y revisa git diff antes de hacer commit.",
+    "DMsecurity no ejecuta scripts de prueba del repositorio desde WhatsApp.",
+  ].join("\n");
+}
+
+async function dependencyRepairFromAdminChat(): Promise<string> {
+  const review = await runAdminReview();
+  const dependencyFindings = review.result.findings.filter((finding) => finding.type === "dependency");
+  if (dependencyFindings.length === 0) {
+    return [
+      "DMsecurity 🛡️ · no hay una reparación automática propuesta",
+      "La revisión no detectó dependencias vulnerables. Si la cobertura fue incompleta, restablece los escáneres o la base de OSV antes de continuar.",
+    ].join("\n");
+  }
+  if (!await workingTreeIsClean(review.repository)) {
+    return [
+      "DMsecurity 🛡️ · reparación detenida",
+      "El repositorio tiene cambios locales. No modificaré el lockfile hasta que el árbol de trabajo esté limpio.",
+      "Puedes usar DETALLE para revisar los hallazgos sin cambiar archivos.",
+    ].join("\n");
+  }
+  const repair = packageManagerForLockfiles(review.result.snapshot?.lockfiles ?? []);
+  if (!repair) {
+    return [
+      "DMsecurity 🛡️ · reparación manual necesaria",
+      "Sólo puedo preparar reparaciones seguras para package-lock.json (npm) o pnpm-lock.yaml (pnpm), y no hay un único lockfile compatible.",
+      "Actualiza la dependencia afectada y su lockfile localmente; después responde REVISAR.",
+    ].join("\n");
+  }
+  if (!await packageManagerAvailable(repair.packageManager)) {
+    return [
+      "DMsecurity 🛡️ · reparación no disponible",
+      `${repair.packageManager} no está instalado o no está disponible para el servicio local.`,
+      repair.packageManager === "pnpm"
+        ? "Responde INSTALAR PNPM para recibir una propuesta limitada y confirmable."
+        : "Instala o repara npm localmente y vuelve a solicitar REPARAR DEPENDENCIAS.",
+    ].join("\n");
+  }
+  const commit = review.result.snapshot?.commit;
+  if (!commit) throw new CliError("La revisión no produjo un commit verificable para la reparación.");
+  const proposal = await createPendingDependencyRepair({
+    repository: review.repository,
+    ref: review.reference,
+    commit,
+    lockfile: repair.lockfile,
+    lockfileSha256: await lockfileDigest(review.repository, repair.lockfile),
+    packageManager: repair.packageManager,
+  });
+  return dependencyRepairProposalMessage(proposal);
+}
+
+/** Prepares a pnpm bootstrap based only on the configured repository metadata. */
+async function pnpmInstallFromAdminChat(): Promise<string> {
+  const target = await interactiveSecurityTarget();
+  const version = await packageManagerVersionFromRepository(target.repository);
+  if (!version) {
+    return [
+      "DMsecurity 🛡️ · instalación no disponible",
+      "El package.json configurado no declara una versión estable de pnpm permitida.",
+      "Declara packageManager como pnpm@x.y.z (opcionalmente con su integridad de Corepack) y vuelve a intentarlo.",
+    ].join("\n");
+  }
+  if (await packageManagerAvailable("pnpm")) {
+    return [
+      "DMsecurity 🛡️ · pnpm ya está disponible",
+      `El repositorio requiere pnpm@${version}. No se modificó tu equipo.`,
+      "Responde REPARAR DEPENDENCIAS para preparar la actualización segura del lockfile.",
+    ].join("\n");
+  }
+  const npm = await packageManagerCommand("npm");
+  if (!npm) {
+    return [
+      "DMsecurity 🛡️ · instalación no disponible",
+      "npm no está disponible en este equipo. No puedo instalar pnpm sin una instalación local funcional de Node.js/npm.",
+    ].join("\n");
+  }
+  const proposal = await createPendingPnpmInstall({
+    repository: target.repository,
+    ref: target.reference,
+    commit: await resolveGitCommit(target.repository, target.reference),
+    packageJsonSha256: await lockfileDigest(target.repository, "package.json"),
+    pnpmVersion: version,
+  });
+  return pnpmInstallProposalMessage(proposal);
+}
+
+async function secretRepairFromAdminChat(): Promise<string> {
+  const review = await runAdminReview();
+  const secrets = review.result.findings.filter((finding) => finding.type === "secret");
+  if (secrets.length === 0) {
+    return "DMsecurity 🛡️ · no se detectaron posibles secretos en la última revisión. Si la cobertura está incompleta, corrígela antes de confiar en este resultado.";
+  }
+  const locations = secrets.slice(0, 12).map((finding, index) => `${index + 1}. ${finding.path}${finding.line === undefined ? "" : `:${finding.line}`} · ${finding.id}`);
+  return redactSecrets([
+    "DMsecurity 🛡️ · secretos: reparación guiada",
+    `Se detectaron ${secrets.length} posible(s) secreto(s):`,
+    ...locations,
+    secrets.length > locations.length ? `… y ${secrets.length - locations.length} más; usa dmsecurity detailed-check localmente.` : "",
+    "No puedo revocar una clave desde WhatsApp: entra al proveedor real (GitHub, AWS, Stripe, etc.), revócala y genera una nueva.",
+    "Después reemplázala por una variable de entorno o gestor de secretos, elimina el valor del historial y responde REVISAR.",
+  ].filter(Boolean).join("\n"));
+}
+
+/** Runs one long-lived, allowlisted local WhatsApp administrator conversation. */
+async function runAdminChat(): Promise<number> {
+  const lock = await acquireAdminChatLock();
+  if (!lock) {
+    throw new CliError("El chat de administrador ya está activo. Usa 'dmsecurity admin-chat stop' antes de iniciar otra sesión.");
+  }
+  let chat: Awaited<ReturnType<typeof openWhatsAppAdminChat>> | undefined;
+  let interval: NodeJS.Timeout | undefined;
+  try {
+    const options = await whatsAppOptionsFromEnvironment();
+    const connectedChat = await openWhatsAppAdminChat(options);
+    chat = connectedChat;
+    let latestReview: AnalysisResult | null = null;
+    let latestTarget: { repository: string; reference: string } | null = null;
+    let nextExpensiveActionAt = 0;
+    let draining = false;
+    const drainOutbox = async (): Promise<void> => {
+      if (draining) return;
+      draining = true;
+      try {
+        await deliverPendingNotifications(connectedChat.notificationTransport());
+      } catch {
+        // Delivery failures stay queued with their safe status for a later retry.
+      } finally {
+        draining = false;
+      }
+    };
+    const review = async (): Promise<{ result: AnalysisResult; repository: string; reference: string }> => {
+      const completed = await runAdminReview();
+      latestReview = completed.result;
+      latestTarget = { repository: completed.repository, reference: completed.reference };
+      return completed;
+    };
+    const send = async (message: string): Promise<void> => {
+      await connectedChat.sendText(message);
+    };
+    const expensiveActionWait = (): string | null => {
+      const remaining = nextExpensiveActionAt - Date.now();
+      if (remaining <= 0) return null;
+      return `DMsecurity 🛡️ · espera ${Math.ceil(remaining / 1000)} s antes de solicitar otra revisión. Esto protege el equipo contra ejecuciones repetidas.`;
+    };
+    const finishExpensiveAction = (): void => {
+      nextExpensiveActionAt = Date.now() + 30_000;
+    };
+
+    interval = setInterval(() => { void drainOutbox(); }, 20_000);
+    await send(`${adminChatMenu()}\n\nEl chat quedó activo para ${repositoryAlias((await interactiveSecurityTarget()).repository)}.`);
+    await drainOutbox();
+    let messageQueue = Promise.resolve();
+    connectedChat.onMessage(async (message) => {
+      messageQueue = messageQueue.catch(() => undefined).then(async () => {
+      const command = parseAdminCommand(message.text);
+      try {
+        if (command.kind === "menu") return send(adminChatMenu());
+        if (command.kind === "unknown") return send(unknownAdminCommandMessage());
+        if (command.kind === "cancel") {
+          await Promise.all([clearPendingDependencyRepair(), clearPendingPnpmInstall()]);
+          return send("DMsecurity 🛡️ · se descartó cualquier acción pendiente. No se modificó el repositorio.");
+        }
+        if (command.kind === "review") {
+          const wait = expensiveActionWait();
+          if (wait) return send(wait);
+          await send("DMsecurity 🛡️ · recibí REVISAR. Estoy analizando dependencias, secretos y cobertura…");
+          try {
+            const completed = await review();
+            return send(adminReviewMessage(completed.result, repositoryAlias(completed.repository), completed.reference));
+          } finally {
+            finishExpensiveAction();
+          }
+        }
+        if (command.kind === "details") {
+          await send("DMsecurity 🛡️ · recibí DETALLE. Estoy preparando el resumen redactado…");
+          const completed = latestReview && latestTarget
+            ? { result: latestReview, repository: latestTarget.repository, reference: latestTarget.reference }
+            : await review();
+          return send(adminDetailMessage(completed.result));
+        }
+        if (command.kind === "repair_dependencies") {
+          const wait = expensiveActionWait();
+          if (wait) return send(wait);
+          await send("DMsecurity 🛡️ · recibí REPARAR DEPENDENCIAS. Revisaré el repositorio y prepararé una propuesta segura…");
+          try {
+            return send(await dependencyRepairFromAdminChat());
+          } finally {
+            finishExpensiveAction();
+          }
+        }
+        if (command.kind === "repair_secrets") {
+          const wait = expensiveActionWait();
+          if (wait) return send(wait);
+          await send("DMsecurity 🛡️ · recibí REPARAR SECRETOS. Revisaré los hallazgos y prepararé la guía de rotación…");
+          try {
+            return send(await secretRepairFromAdminChat());
+          } finally {
+            finishExpensiveAction();
+          }
+        }
+        if (command.kind === "install_pnpm") {
+          await send("DMsecurity 🛡️ · recibí INSTALAR PNPM. Verificaré la versión fijada por el repositorio y prepararé una propuesta limitada…");
+          return send(await pnpmInstallFromAdminChat());
+        }
+        if (command.kind === "confirm") {
+          const [repairProposal, pnpmProposal] = await Promise.all([
+            loadPendingDependencyRepair(),
+            loadPendingPnpmInstall(),
+          ]);
+          if (repairProposal && repairProposal.token === command.token) {
+            await send("DMsecurity 🛡️ · confirmación recibida. Aplicando únicamente la reparación propuesta y verificando el lockfile…");
+            return send(await applyConfirmedDependencyRepair(repairProposal));
+          }
+          if (pnpmProposal && pnpmProposal.token === command.token) {
+            await send("DMsecurity 🛡️ · confirmación recibida. Instalaré únicamente pnpm con la versión y las opciones mostradas…");
+            return send(await applyConfirmedPnpmInstall(pnpmProposal));
+          }
+          return send("DMsecurity 🛡️ · no existe una propuesta válida con ese código. Solicita REPARAR DEPENDENCIAS o INSTALAR PNPM otra vez.");
+        }
+        return send(unknownAdminCommandMessage());
+      } catch {
+        return send("DMsecurity 🛡️ · no pude completar esa acción. El problema se registró sólo de forma local; usa MENU o revisa la terminal del servicio.");
+      }
+      });
+      await messageQueue;
+    });
+    process.stdout.write("DMsecurity: chat de administrador activo. Sólo acepta mensajes directos del número configurado. Presiona Ctrl+C para detenerlo.\n");
+    await connectedChat.waitUntilClosed();
+    throw new CliError("El chat de administrador perdió la conexión con WhatsApp. Vuelve a vincularlo con dmsecurity --login si no se reconecta.");
+  } finally {
+    if (interval) clearInterval(interval);
+    if (chat) await chat.close();
+    await releaseAdminChatLock(lock);
+  }
+}
+
+async function runAdminChatCommand(argv: string[]): Promise<number> {
+  if (argv.length === 1) return runAdminChat();
+  if (argv.length !== 2 || !["install", "stop"].includes(argv[1] ?? "")) {
+    throw new CliError("Usa 'dmsecurity admin-chat', 'dmsecurity admin-chat install' o 'dmsecurity admin-chat stop'.");
+  }
+  if (argv[1] === "stop") {
+    await disableAdminChatService();
+    await clearAdminChatActive();
+    process.stdout.write("Chat de administrador detenido y servicio local eliminado.\n");
+    return 0;
+  }
+  const entrypoint = fileURLToPath(import.meta.url);
+  const unit = await writeAdminChatUnit(entrypoint, process.execPath);
+  try {
+    await enableAdminChatService();
+  } catch {
+    throw new CliError(`El servicio se creó en ${unit}, pero systemd no pudo activarlo. Ejecuta 'systemctl --user daemon-reload && systemctl --user enable --now dmsecurity-admin-chat.service'.`);
+  }
+  process.stdout.write("Chat de administrador activado. Escribe MENU desde el número configurado para ver las acciones permitidas.\n");
+  return 0;
+}
+
+function interactiveCommandArguments(value: string): string[] | null {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts[0] === "dmsecurity") parts.shift();
+  return parts.length > 0 ? parts : null;
+}
+
+/** Shows a reference table and safely dispatches one typed DMsecurity command. */
+async function runCommands(): Promise<number> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stdout.write(commandReference());
+    return 0;
+  }
+  while (true) {
+    process.stdout.write(commandReference());
+    const terminal = createInterface({ input: process.stdin, output: process.stdout });
+    let input: string;
+    try {
+      input = (await terminal.question("Ingresa un comando o presiona 0 para regresar: ")).trim();
+    } catch {
+      return 0;
+    } finally {
+      terminal.close();
+    }
+    if (!input || input === "0") return 0;
+    const argv = interactiveCommandArguments(input);
+    if (!argv) {
+      process.stdout.write("Ingresa un comando de la tabla o presiona 0 para regresar.\n");
+      continue;
+    }
+    if (argv[0] === "comandos" || argv[0] === "--help" || argv[0] === "-h") {
+      process.stdout.write("Ya estás en la vista de comandos. Elige otro comando o presiona 0.\n");
+      continue;
+    }
+    const exitCode = await main(argv);
+    if (exitCode !== 0) process.stdout.write("El comando terminó con un error. Revisa el mensaje anterior e inténtalo de nuevo.\n");
+  }
+}
+
 /** One interactive setup: local settings, QR link, user timer and pre-commit hook. */
 async function runOnboard(): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliError("onboard requiere una terminal interactiva.");
@@ -560,9 +1255,12 @@ async function runOnboard(): Promise<number> {
     const reference = (await terminal.question("Rama o referencia para revisiones periódicas [HEAD]: ")).trim() || "HEAD";
     await validateReference(repository, reference);
     process.stdout.write(setupSuccess(`Repositorio validado · referencia ${reference}`));
+    await saveSecurityTarget(repository, reference);
+    process.stdout.write(setupSuccess("Repositorio guardado para verificaciones rápidas y detalladas."));
 
     process.stdout.write(setupStep(2, "Alertas por WhatsApp", "Vincula una cuenta por QR; solo se enviarán resúmenes seguros."));
     const configureWhatsApp = enabled(await terminal.question("¿Configurar alertas por WhatsApp ahora? [S/n]: "), true);
+    let activateAdminChat = false;
     if (configureWhatsApp) {
       const saved = await loadWhatsAppSettings();
       const current = saved ? ` [${saved.recipient}]` : "";
@@ -576,6 +1274,10 @@ async function runOnboard(): Promise<number> {
       process.stdout.write(setupSuccess(`Destinatario guardado localmente · ${settings.recipient}`));
       await loginWhatsApp();
       process.stdout.write(setupSuccess("WhatsApp vinculado."));
+      activateAdminChat = enabled(await terminal.question("¿Activar el chat seguro de administrador por WhatsApp? [S/n]: "), true);
+      if (activateAdminChat) {
+        process.stdout.write(setupSuccess("El chat se activará después de enviar el resumen de la primera verificación."));
+      }
     } else {
       process.stdout.write(setupWarning("Las alertas por WhatsApp permanecerán desactivadas."));
     }
@@ -632,6 +1334,15 @@ async function runOnboard(): Promise<number> {
           notification.failure ? notificationFailureDetails(notification.failure) : "El mensaje quedó en cola y se reintentará en la siguiente revisión.",
         ].join(" ")));
     }
+    if (activateAdminChat) {
+      try {
+        const unit = await writeAdminChatUnit(fileURLToPath(import.meta.url), process.execPath);
+        await enableAdminChatService();
+        process.stdout.write(setupSuccess(`Chat de administrador activado · ${unit}`));
+      } catch {
+        process.stdout.write(setupWarning("No se pudo activar el chat de administrador con systemd. Puedes intentar después: dmsecurity admin-chat install"));
+      }
+    }
     if (scheduledEntry) {
       try {
         await enableSchedule(scheduledEntry.id);
@@ -651,13 +1362,12 @@ async function runOnboard(): Promise<number> {
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (argv.length === 0) return 0;
-  if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
-    process.stdout.write(`${usage()}\n`);
-    return 0;
-  }
   try {
+    if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "comandos")) return await runCommands();
     if (argv.length === 1 && argv[0] === "--login") return await runWhatsApp(["whatsapp", "login"]);
     if (argv.length === 1 && argv[0] === "--logout") return await runWhatsApp(["whatsapp", "logout"]);
+    if (argv.length === 1 && argv[0] === "detailed-check") return await runDetailedSecurityCheck();
+    if (argv[0] === "admin-chat") return await runAdminChatCommand(argv);
     if (argv[0] === "scan") {
       const args = parseArguments(argv);
       const { result, output } = await executeScan(args);
@@ -680,14 +1390,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     throw new CliError(`Unknown command.\n${usage()}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected CLI failure.";
-    process.stderr.write(`guardia: ${message}\n`);
+    process.stderr.write(`DMsecurity: ${message}\n`);
     return 2;
   }
 }
 
 function shouldOfferNextActionMenu(argv: string[]): boolean {
   if (argv.length === 0) return true;
-  return argv.length === 1 && ["onboard", "--login", "--logout", "--help", "-h"].includes(argv[0] ?? "");
+  return argv.length === 1 && ["onboard", "--login", "--logout", "--help", "-h", "comandos", "detailed-check", "admin-chat"].includes(argv[0] ?? "");
 }
 
 /** Presents follow-up actions only to a person at an interactive terminal. */
@@ -696,36 +1406,30 @@ async function offerNextActionMenu(): Promise<void> {
     "1": ["--login"],
     "2": ["--logout"],
     "3": ["onboard"],
-    "4": ["--help"],
+    "4": ["comandos"],
+    "5": ["detailed-check"],
+    "6": ["admin-chat", "install"],
   };
 
   while (true) {
-    process.stdout.write([
-      "",
-      "¿Qué deseas hacer ahora?",
-      "  1. dmsecurity --login",
-      "  2. dmsecurity --logout",
-      "  3. dmsecurity onboard",
-      "  4. dmsecurity --help",
-      "  5. Salir",
-    ].join("\n") + "\n");
+    process.stdout.write(actionMenu());
     const terminal = createInterface({ input: process.stdin, output: process.stdout });
     let choice: string;
     try {
-      choice = (await terminal.question("Elige una opción [5]: ")).trim() || "5";
+      choice = (await terminal.question("Elige una opción [0]: ")).trim() || "0";
     } catch {
       return;
     } finally {
       terminal.close();
     }
 
-    if (choice === "5") {
+    if (choice === "0") {
       process.stdout.write("Hasta pronto.\n");
       return;
     }
     const argv = actions[choice];
     if (!argv) {
-      process.stdout.write("Opción inválida. Escribe un número del 1 al 5.\n");
+      process.stdout.write("Opción inválida. Escribe un número del 0 al 6.\n");
       continue;
     }
     const exitCode = await main(argv);

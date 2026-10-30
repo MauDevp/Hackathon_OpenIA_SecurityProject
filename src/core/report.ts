@@ -89,7 +89,7 @@ export function serializeReport(result: AnalysisResult, executedAt?: string): st
 
 export function terminalSummary(result: AnalysisResult, reportPath: string): string {
   const lines = [
-    `guardia: ${result.status} (exit ${result.exitCode})`,
+    `DMsecurity: ${result.status} (exit ${result.exitCode})`,
     `commit: ${result.snapshot?.commit ?? "unavailable"}`,
     `isolation: ${result.isolation}${result.strictOffline ? " (strict requested)" : ""}`,
     `findings: ${result.findings.length}`,

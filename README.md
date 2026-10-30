@@ -37,7 +37,7 @@ Everything runs on your machine. No LLM, no cloud, no credentials, no network on
 ```text
 $ npm run scan -- --repo ~/code/my-app --ref HEAD --out /tmp/my-app-report.json
 
-guardia: FINDINGS (exit 1)
+DMsecurity: FINDINGS (exit 1)
 commit: cefa3873b9250f27d5eed940a468c5dd737893ea
 isolation: not_requested
 findings: 9
@@ -46,7 +46,7 @@ gitleaks: ok (8.30.1)
 report: /tmp/my-app-report.json
 ```
 
-The command-line tool is called `guardia`, the project's original name. It stays that way so existing scripts keep working.
+The command-line tool is `dmsecurity`.
 
 ---
 
@@ -111,11 +111,17 @@ dmsecurity           # open the interactive action menu
 dmsecurity --login   # link WhatsApp with a QR code
 dmsecurity --logout  # remove the local linked-device session
 dmsecurity onboard   # guided repository, alert and hook setup
+dmsecurity comandos       # command reference and interactive prompt
+dmsecurity detailed-check # local findings, locations and fix guidance
+dmsecurity admin-chat install # activate the local secure administrator chat
 ```
 
 When one of those interactive commands finishes, DMsecurity shows a small
-numbered menu with those same actions and `Salir`. Scans, Git hooks and
-scheduled jobs never show it, so they remain automation-friendly.
+numbered menu with those actions and `Salir`. The detailed check uses the
+repository saved by `onboard`; it lists redacted
+findings, their local locations and remediation guidance without sending that
+extra detail to WhatsApp. Scans, Git hooks and scheduled jobs never show the
+menu, so they remain automation-friendly.
 
 The setup assistant asks before linking WhatsApp, enabling a systemd user timer
 or installing a Git pre-commit hook. It never overwrites an existing hook.
@@ -133,14 +139,29 @@ reason without printing credentials, phone numbers or provider logs. The first
 periodic timer is activated only after this first alert, so it cannot compete
 for the linked WhatsApp session.
 
+During onboarding you can also activate the local administrator chat. It uses
+the same QR-linked session and accepts direct messages only from the configured
+recipient; groups, other contacts and free-form shell text are ignored. Send
+`MENU` from that administrator chat to choose `REVISAR`, `DETALLE`,
+`REPARAR DEPENDENCIAS`, `REPARAR SECRETOS`, `INSTALAR PNPM` or `CANCELAR`.
+`INSTALAR PNPM` is available only when the configured repository declares a
+stable `pnpm@x.y.z` in `packageManager`: it proposes the exact version first,
+requires `CONFIRMAR <código>`, installs it only in `~/.local/bin` from the
+official npm registry with scripts disabled, and never installs project
+dependencies by itself. DMsecurity verifies that the installed binary reports
+that exact version before enabling dependency repair. Dependency repair is
+always proposed first and needs `CONFIRMAR <código>` within ten minutes. It
+uses fixed npm/pnpm arguments with `--ignore-scripts`, never `--force`, and
+leaves the resulting diff uncommitted for local review and tests.
+
 What `bash scripts/install.sh` does, so you can trust it:
 
 - Downloads **OSV-Scanner 2.7.0** and **Gitleaks 8.30.1** from their GitHub releases into the Git-ignored folder `.guardia/tools/` and verifies each SHA-256 against the values recorded in [docs/scanners.md](docs/scanners.md). Your system stays untouched.
 - Downloads the OSV advisory database for npm (about 220 MB, once) into `.guardia/osv-db/` and writes the metadata the report uses. Need other ecosystems? Pass one lockfile per ecosystem: `npm run setup -- --lockfile /path/to/poetry.lock`.
 - Is safe to re-run. Present binaries are kept, and so is the database when you pass no `--lockfile`; `npm run setup -- --refresh-db` or an explicit `--lockfile` downloads fresh advisories.
-- Starts `guardia onboard` in an interactive terminal. Use `npm run setup -- --no-onboard` for automation without prompts.
+- Starts `dmsecurity onboard` in an interactive terminal. Use `npm run setup -- --no-onboard` for automation without prompts.
 
-`npm run scan` is `guardia scan` with the environment already pointed at those folders. Run it from the DMsecurity directory.
+`npm run scan` is `dmsecurity scan` with the environment already pointed at those folders. Run it from the DMsecurity directory.
 
 > 💡 Want to see `FINDINGS` right away? Scan this very repository: its `fixtures/` folder holds a deliberately vulnerable `lodash@4.17.20` lockfile and synthetic fake secrets.
 >
@@ -185,13 +206,29 @@ Delivery failures remain in a private local outbox and never change the scan
 verdict. The linked-session keys are stored in
 `$XDG_STATE_HOME/dmsecurity/whatsapp-auth` (or under `DMSECURITY_STATE_DIR`)
 with restricted permissions. If WhatsApp invalidates the linked device, run
-`guardia whatsapp login` again. `DMSECURITY_WHATSAPP_RECIPIENT` remains an
+`dmsecurity --login` again. `DMSECURITY_WHATSAPP_RECIPIENT` remains an
 optional per-process override for advanced use. WhatsApp cannot be combined with
 `--strict-offline`, because sending a message requires network access.
 
 To start a link from scratch, first remove the DMsecurity device in WhatsApp's
-**Linked devices** screen, then run `guardia whatsapp reset` before onboarding
+**Linked devices** screen, then run `dmsecurity --logout` before onboarding
 again. This removes only local linked-device credentials.
+
+### Secure administrator chat
+
+The setup assistant can enable it automatically after the first alert, or use:
+
+```bash
+dmsecurity admin-chat install  # start the systemd user service
+dmsecurity admin-chat stop     # stop it and remove the local service
+```
+
+The service remains on your machine and owns the WhatsApp Web session. While
+it is active, periodic alerts are queued locally and delivered through that
+same connection. `DETALLE` returns a bounded redacted list; use the local
+`dmsecurity detailed-check` for the full report. Secrets are never changed or
+revoked automatically: DMsecurity points to the redacted location and you
+rotate them in the actual provider.
 
 ### Schedule a local recurring scan
 
@@ -244,7 +281,7 @@ esac
 ## Usage
 
 ```text
-guardia scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline]
+dmsecurity scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline]
 ```
 
 | Flag | Required | Description |
@@ -385,7 +422,7 @@ DMsecurity is honest about what it is not. Read these before relying on it:
 - **Network isolation is not verified.** `--offline` tells OSV-Scanner not to call home, but DMsecurity does not yet sandbox or trace the process. `--strict-offline` therefore always returns `INCOMPLETE`.
 - **No severity threshold.** Every finding counts; there is no "fail only on HIGH" option yet.
 - **Database freshness is your job.** The report shows the download time and checksum; run `npm run setup -- --refresh-db` to update.
-- **Working directory matters.** The default database path is relative to where you run the CLI. `npm run scan` and the scripts handle this; raw `guardia` calls should use absolute paths.
+- **Working directory matters.** The default database path is relative to where you run the CLI. `npm run scan` and the scripts handle this; raw `dmsecurity` calls should use absolute paths.
 - **Static analysis is not included.** Semgrep CE is a candidate for a later adapter, not a feature.
 - **Automated setup is Linux x86_64 only.** Other platforms follow the manual steps.
 
@@ -401,7 +438,7 @@ DMsecurity is honest about what it is not. Read these before relying on it:
 - [x] CI workflow on Node 22 and 24 with a CLI smoke test
 - [x] One-command setup with checksum verification, scheduled scan script, GitHub Actions alert example
 - [ ] Verified network isolation so `--strict-offline` can reach `PASS`
-- [ ] `--db-dir` flag so raw `guardia` calls need no environment variables
+- [ ] `--db-dir` flag so raw `dmsecurity` calls need no environment variables
 - [ ] Severity threshold and per-finding suppression with an audit trail
 - [ ] SARIF export
 - [ ] Semgrep CE adapter (optional static analysis)

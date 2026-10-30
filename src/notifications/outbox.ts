@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, stat, utimes, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 
@@ -14,6 +14,7 @@ import { notificationDedupeKey } from "./formatter.js";
 import { notificationStateDir } from "./state.js";
 
 const MAX_ATTEMPTS = 5;
+const INFLIGHT_RECOVERY_MS = 5 * 60 * 1000;
 
 export interface OutboxOptions {
   stateDir?: string;
@@ -30,14 +31,30 @@ export interface DeliveryResult extends QueueResult {
   failure?: NotificationFailure;
 }
 
-function directories(options: OutboxOptions): { root: string; pending: string; sent: string; failed: string } {
+function directories(options: OutboxOptions): { root: string; pending: string; inflight: string; sent: string; failed: string } {
   const root = options.stateDir ?? notificationStateDir();
   return {
     root,
     pending: join(root, "outbox", "pending"),
+    inflight: join(root, "outbox", "inflight"),
     sent: join(root, "outbox", "sent"),
     failed: join(root, "outbox", "failed"),
   };
+}
+
+/** A crashed sender may leave a claimed event. Recover only after its lease expires. */
+async function recoverStaleInflight(paths: ReturnType<typeof directories>, now: Date): Promise<void> {
+  for (const entry of await readdir(paths.inflight, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const claimed = join(paths.inflight, entry.name);
+    try {
+      const metadata = await stat(claimed);
+      if (now.getTime() - metadata.mtime.getTime() < INFLIGHT_RECOVERY_MS) continue;
+      await rename(claimed, join(paths.pending, entry.name));
+    } catch {
+      // A different sender may have completed or recovered this file first.
+    }
+  }
 }
 
 async function ensureDirectories(options: OutboxOptions): Promise<ReturnType<typeof directories>> {
@@ -57,6 +74,19 @@ async function exists(path: string): Promise<boolean> {
 
 function pendingPath(pending: string, key: string): string {
   return join(pending, `${key}.json`);
+}
+
+/** A fingerprint is terminal once sent or exhausted, and is still owned while
+ * in flight. Checking every state prevents a second timer from enqueuing a
+ * duplicate during the atomic pending → inflight hand-off. */
+async function eventAlreadyTracked(paths: ReturnType<typeof directories>, dedupeKey: string): Promise<boolean> {
+  const filename = `${dedupeKey}.json`;
+  return (await Promise.all([
+    exists(join(paths.pending, filename)),
+    exists(join(paths.inflight, filename)),
+    exists(join(paths.sent, filename)),
+    exists(join(paths.failed, filename)),
+  ])).some(Boolean);
 }
 
 function delayForAttempt(attempts: number): number {
@@ -82,7 +112,7 @@ export async function queueNotification(event: NotificationEvent, options: Outbo
   const paths = await ensureDirectories(options);
   const dedupeKey = notificationDedupeKey(event);
   const file = pendingPath(paths.pending, dedupeKey);
-  if (await exists(file) || await exists(join(paths.sent, `${dedupeKey}.json`))) {
+  if (await eventAlreadyTracked(paths, dedupeKey)) {
     return { status: "skipped", dedupeKey };
   }
   const item: QueuedNotification = {
@@ -108,33 +138,44 @@ export async function deliverPendingNotifications(
 ): Promise<DeliveryResult[]> {
   const paths = await ensureDirectories(options);
   const now = options.now ?? new Date();
+  await recoverStaleInflight(paths, now);
   const results: DeliveryResult[] = [];
   for (const entry of await readdir(paths.pending, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const file = join(paths.pending, entry.name);
-    const item = parseQueued(await readFile(file, "utf8"));
+    const claimed = join(paths.inflight, entry.name);
+    try {
+      // Atomic rename is the claim: concurrent timers cannot send one alert twice.
+      await rename(file, claimed);
+      await utimes(claimed, now, now);
+    } catch {
+      continue;
+    }
+    const item = parseQueued(await readFile(claimed, "utf8"));
     if (item === null) {
-      await rename(file, join(paths.failed, entry.name));
+      await rename(claimed, join(paths.failed, entry.name));
       continue;
     }
     if (Date.parse(item.nextAttemptAt) > now.getTime()) {
+      await rename(claimed, file);
       results.push({ status: "skipped", dedupeKey: item.dedupeKey, attempts: item.attempts });
       continue;
     }
     try {
       await transport.send(item.event);
-      await rename(file, join(paths.sent, entry.name));
+      await rename(claimed, join(paths.sent, entry.name));
       results.push({ status: "sent", dedupeKey: item.dedupeKey, attempts: item.attempts + 1 });
     } catch (error) {
       const attempts = item.attempts + 1;
       const failure = notificationFailureFromError(error);
       if (attempts >= MAX_ATTEMPTS) {
-        await writeFile(file, `${JSON.stringify({ ...item, attempts, lastError: "delivery failed", lastFailure: failure })}\n`, { encoding: "utf8", mode: 0o600 });
-        await rename(file, join(paths.failed, entry.name));
+        await writeFile(claimed, `${JSON.stringify({ ...item, attempts, lastError: "delivery failed", lastFailure: failure })}\n`, { encoding: "utf8", mode: 0o600 });
+        await rename(claimed, join(paths.failed, entry.name));
         results.push({ status: "failed", dedupeKey: item.dedupeKey, attempts, failure });
       } else {
         const nextAttemptAt = new Date(now.getTime() + delayForAttempt(attempts)).toISOString();
-        await writeFile(file, `${JSON.stringify({ ...item, attempts, nextAttemptAt, lastError: "delivery failed", lastFailure: failure })}\n`, { encoding: "utf8", mode: 0o600 });
+        await writeFile(claimed, `${JSON.stringify({ ...item, attempts, nextAttemptAt, lastError: "delivery failed", lastFailure: failure })}\n`, { encoding: "utf8", mode: 0o600 });
+        await rename(claimed, file);
         results.push({ status: "queued", dedupeKey: item.dedupeKey, attempts, failure });
       }
     }

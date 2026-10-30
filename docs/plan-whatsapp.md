@@ -22,8 +22,17 @@ con cobertura suficiente; no significa que el commit sea seguro.
 - WhatsApp rompe deliberadamente el modo totalmente local: un resumen de la
   alerta viaja a WhatsApp Web mediante una sesión local enlazada por QR. Será
   *opt-in*, estará apagado por defecto e incompatible con `--strict-offline`.
-- La primera versión será sólo de salida. No aceptará comandos entrantes por
-  WhatsApp ni expondrá un webhook público.
+- El chat de administrador es local y opcional: un servicio de usuario de
+  systemd conserva una sola sesión Baileys, sin webhook ni servidor público.
+  Sólo acepta mensajes directos del número destinatario configurado; ignora
+  grupos, mensajes propios y cualquier otro contacto.
+- El chat no interpreta shell. Su lista cerrada es `MENU`, `REVISAR`,
+  `DETALLE`, `REPARAR DEPENDENCIAS`, `REPARAR SECRETOS`, `INSTALAR PNPM`,
+  `CONFIRMAR <código>` y `CANCELAR`. `INSTALAR PNPM` sólo permite la versión
+  estable declarada por `packageManager`, la instala en `~/.local/bin` desde
+  el registro oficial con scripts desactivados y exige un código aleatorio de
+  un solo uso que caduca en diez minutos. Cada reparación de dependencias
+  muestra también su comando fijo y exige confirmación independiente.
 - La programación se realizará con el script existente y un timer de usuario
   (systemd) o cron; no será necesario un servidor permanente.
 - Un error de WhatsApp no altera el resultado de seguridad. El escaneo termina
@@ -80,6 +89,8 @@ timer / hook pre-commit
 | `src/notifications/whatsapp.ts` | Sesión Baileys, QR, persistencia privada de credenciales y envío redactado. |
 | `src/notifications/settings.ts` | Destinatario persistente local, sin token ni variable de terminal requerida. |
 | `src/notifications/outbox.ts` | Cola persistente, deduplicación y reintentos con *backoff*. |
+| `src/admin/chat.ts` | Allowlist, propuesta/confirmación de reparación y estado privado del chat. |
+| `src/admin/service.ts` | Unidad systemd de usuario para mantener el chat local activo. |
 | `src/core/index-snapshot.ts` | Materializa en temporal el contenido del índice Git para el pre-commit. |
 | `src/cli/schedule.ts` | Comandos para crear, listar y quitar programaciones de usuario. |
 | `scripts/pre-commit.sh` | Hook instalable explícitamente que llama a `check-staged`. |
@@ -125,8 +136,8 @@ configuración versionada; tampoco se pasan a OSV-Scanner ni Gitleaks.
 
 ```text
 DMsecurity 🛡️ · FINDINGS
-Repo: mi-api · commit: abcd123
-Hallazgos: 2 · OSV: ok · Gitleaks: ok
+Repositorio: mi-api · referencia: main · objetivo: abcd123
+Detalle: 2 vulnerabilidades de dependencias (OSV) · 1 posible secreto expuesto (gitleaks).
 Acción: revisa el reporte local antes de continuar.
 ```
 
@@ -139,6 +150,33 @@ No se pudo completar toda la cobertura. Revisa la instalación local.
 Por defecto no se envían rutas de archivos, IDs detallados de vulnerabilidad,
 nombres de dependencias ni valores secretos. Un nivel de detalle mayor sólo
 podrá habilitarse con una opción local explícita y documentada.
+
+### Chat de administrador y reparación guiada
+
+`dmsecurity admin-chat install` crea y activa un servicio **local de
+usuario**. Al escribir `MENU` desde el número configurado, DMsecurity pregunta
+qué acción realizar y responde con las opciones permitidas. Las alertas y el
+chat comparten la misma sesión Baileys: cuando el chat está activo, los timers
+ponen alertas en la outbox y el servicio las entrega, evitando dos conexiones
+simultáneas del mismo dispositivo enlazado.
+
+- `REVISAR` crea el reporte privado y envía el estado, conteos y cobertura.
+- `DETALLE` devuelve hasta doce hallazgos ya redactados al único administrador;
+  la lista completa sigue siendo `dmsecurity detailed-check` local.
+- `REPARAR DEPENDENCIAS` sólo se ofrece con un árbol Git limpio y un único
+  `package-lock.json` (npm) o `pnpm-lock.yaml` (pnpm). Propone exactamente
+  `npm audit fix --package-lock-only --ignore-scripts` o
+  `pnpm audit --fix --ignore-scripts`; no usa `--force`, no ejecuta scripts
+  del proyecto, no hace `git add` ni `git commit`. Tras `CONFIRMAR <código>`
+  revisa de nuevo el lockfile actualizado con OSV y deja los cambios para que
+  la persona los inspeccione con `git diff` y ejecute sus pruebas locales.
+- `REPARAR SECRETOS` no borra ni rota credenciales a ciegas. Muestra rutas
+  redactadas y pide revocar/rotar en el proveedor real, reemplazar por un
+  gestor de secretos o variable de entorno, y limpiar el historial.
+
+No se acepta `sí`, texto libre, adjuntos ni comandos con argumentos. Un fallo
+de envío o la caída del servicio no cambia el resultado del escaneo; los
+eventos siguen en la outbox privada.
 
 ## Escaneo programado
 
@@ -288,8 +326,9 @@ commit; `PASS` lo permite; `INCOMPLETE` falla cerrado en `block`.
 
 ## Fuera de alcance inicial
 
-- Leer, interpretar o ejecutar comandos recibidos por WhatsApp.
-- Enviar código, valores secretos, el reporte completo o rutas sensibles.
+- Ejecutar shell, scripts del repositorio o instrucciones arbitrarias recibidas por WhatsApp.
+- Rotar o revocar automáticamente credenciales en proveedores externos.
+- Enviar código, valores secretos o el reporte completo.
 - Afirmar que un `PASS` garantiza seguridad.
 - Instalar hooks, timers o cron sin una confirmación explícita dentro del
   asistente de instalación.

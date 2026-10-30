@@ -1,12 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { AnalysisResult, ScannerResult } from "../contracts.js";
+import type { AnalysisResult, Finding, ScannerResult } from "../contracts.js";
 import { redactSecrets } from "../core/report.js";
 import type { GuardiaReport } from "../core/report.js";
 import type { NotificationEvent, NotificationTrigger } from "./contracts.js";
 
 function scannerStates(scanners: ScannerResult[]): NotificationEvent["scannerStates"] {
   return scanners.map((scanner) => ({ scanner: scanner.scanner, status: scanner.status }));
+}
+
+function findingBreakdown(findings: Finding[]): NonNullable<NotificationEvent["findingBreakdown"]> {
+  const counts = new Map<string, NonNullable<NotificationEvent["findingBreakdown"]>[number]>();
+  for (const finding of findings) {
+    const key = `${finding.scanner}:${finding.type}`;
+    const current = counts.get(key);
+    if (current) current.count += 1;
+    else counts.set(key, { scanner: finding.scanner, type: finding.type, count: 1 });
+  }
+  return [...counts.values()].sort((left, right) => `${left.scanner}:${left.type}`.localeCompare(`${right.scanner}:${right.type}`));
 }
 
 /** Converts the normalized local result into the minimum safe alert payload. */
@@ -24,6 +35,7 @@ export function eventFromAnalysis(
     commit: result.snapshot?.commit ?? null,
     status: result.status,
     findingCount: result.findings.length,
+    findingBreakdown: findingBreakdown(result.findings),
     scannerStates: scannerStates(result.scanners),
     trigger,
   };
@@ -44,6 +56,7 @@ export function eventFromReport(
     commit: report.commit,
     status: report.status,
     findingCount: report.findings.length,
+    findingBreakdown: findingBreakdown(report.findings),
     scannerStates: report.scanners.map((scanner) => ({ scanner: scanner.scanner, status: scanner.status })),
     trigger,
   };
@@ -57,6 +70,7 @@ export function notificationDedupeKey(event: NotificationEvent): string {
     commit: event.commit,
     status: event.status,
     findingCount: event.findingCount,
+    findingBreakdown: [...(event.findingBreakdown ?? [])].sort((a, b) => `${a.scanner}:${a.type}`.localeCompare(`${b.scanner}:${b.type}`)),
     scannerStates: [...event.scannerStates].sort((a, b) => a.scanner.localeCompare(b.scanner)),
     trigger: event.trigger,
   });
@@ -81,9 +95,22 @@ function improvement(event: NotificationEvent): string {
   return `Mejora necesaria: instala o corrige ${unavailable || "los componentes pendientes"} y vuelve a ejecutar la revisión.`;
 }
 
+function findingsDetail(event: NotificationEvent): string | null {
+  if (event.status !== "FINDINGS") return null;
+  const breakdown = event.findingBreakdown ?? [];
+  if (breakdown.length === 0) return `Detalle: ${event.findingCount} hallazgo(s) detectado(s); abre el reporte local para revisar cada uno.`;
+  const detail = breakdown.map((item) => {
+    if (item.type === "dependency") {
+      return `${item.count} vulnerabilidad${item.count === 1 ? "" : "es"} de dependencias (${item.scanner.toUpperCase()})`;
+    }
+    return `${item.count} posible${item.count === 1 ? "" : "s"} secreto${item.count === 1 ? "" : "s"} expuesto${item.count === 1 ? "" : "s"} (${item.scanner})`;
+  });
+  return `Detalle: ${detail.join(" · ")}.`;
+}
+
 /** The only text allowed to leave the machine through the WhatsApp transport. */
 export function formatWhatsAppMessage(event: NotificationEvent): string {
-  const commit = event.commit ? event.commit.slice(0, 7) : "staged changes";
+  const commit = event.commit ? event.commit.slice(0, 7) : "cambios en staging";
   const title = event.status === "PASS" ? "✅ SIN HALLAZGOS" : event.status === "FINDINGS" ? "⚠️ HALLAZGOS" : "🟡 COBERTURA INCOMPLETA";
   const outcome = event.status === "PASS"
     ? "Resultado: no se detectaron hallazgos. Esto no garantiza seguridad absoluta."
@@ -93,9 +120,10 @@ export function formatWhatsAppMessage(event: NotificationEvent): string {
   const lines = [
     `DMsecurity 🛡️ · ${title}`,
     ...(event.trigger === "onboarding" ? ["✅ Configuración completada. Resumen de la primera revisión:"] : []),
-    `Proyecto: ${redactSecrets(event.repository)} · objetivo: ${redactSecrets(commit)}`,
+    `Repositorio: ${redactSecrets(event.repository)} · referencia: ${redactSecrets(event.ref)} · objetivo: ${redactSecrets(commit)}`,
     `Revisé: ${scannerReview(event)}`,
     outcome,
+    ...(findingsDetail(event) ? [findingsDetail(event) as string] : []),
     improvement(event),
   ];
   return redactSecrets(lines.join("\n")).slice(0, 1024);

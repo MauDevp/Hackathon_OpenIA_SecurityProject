@@ -5,9 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { AnalysisResult } from "../../src/contracts.js";
+import { actionMenu, commandReference, detailedSecurityReport } from "../../src/cli/presentation.js";
 import { eventFromAnalysis, formatWhatsAppMessage } from "../../src/notifications/formatter.js";
 import { deliverPendingNotifications, queueNotification } from "../../src/notifications/outbox.js";
-import { loadWhatsAppSettings, saveWhatsAppSettings } from "../../src/notifications/settings.js";
+import { loadSecurityTarget, loadWhatsAppSettings, saveSecurityTarget, saveWhatsAppSettings } from "../../src/notifications/settings.js";
 import { loginWhatsAppForTesting, whatsAppOptionsFromEnvironment, type BaileysRuntime } from "../../src/notifications/whatsapp.js";
 
 const SECRET = "DEMO_GUARDIA_FAKE_TOKEN_0123456789";
@@ -42,7 +43,9 @@ test("formats a redacted event and deduplicates delivered WhatsApp notifications
     const message = formatWhatsAppMessage(event);
     assert.doesNotMatch(message, new RegExp(SECRET));
     assert.match(message, /DMsecurity 🛡️/);
+    assert.match(message, /Repositorio:/);
     assert.match(message, /Revisé:/);
+    assert.match(message, /1 posible secreto expuesto \(gitleaks\)/);
     assert.match(message, /Mejora recomendada:/);
 
     const onboardingMessage = formatWhatsAppMessage({ ...event, trigger: "onboarding" });
@@ -87,6 +90,75 @@ test("a provider failure is retried without persisting its raw error", async () 
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
+});
+
+test("concurrent outbox workers claim one alert atomically", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "dmsecurity-outbox-"));
+  try {
+    const event = eventFromAnalysis(findingsResult(), "api", "HEAD", "scheduled");
+    await queueNotification(event, { stateDir });
+    let sends = 0;
+    let releaseSend: (() => void) | undefined;
+    const sending = new Promise<void>((resolve) => { releaseSend = resolve; });
+    let announceStart: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { announceStart = resolve; });
+    const transport = {
+      async send() {
+        sends += 1;
+        announceStart?.();
+        await sending;
+        return { providerMessageId: "message-1" };
+      },
+    };
+    const first = deliverPendingNotifications(transport, { stateDir });
+    await started;
+    const duplicateWhileInflight = await queueNotification(event, { stateDir });
+    assert.equal(duplicateWhileInflight.status, "skipped");
+    const second = deliverPendingNotifications(transport, { stateDir });
+    releaseSend?.();
+    await Promise.all([first, second]);
+    assert.equal(sends, 1);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a notification that exhausted retries is not re-enqueued for the same fingerprint", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "dmsecurity-outbox-"));
+  try {
+    const event = eventFromAnalysis(findingsResult(), "api", "HEAD", "scheduled");
+    await queueNotification(event, { stateDir, now: new Date("2026-01-01T00:00:00Z") });
+    for (let hour = 0; hour < 5; hour += 1) {
+      await deliverPendingNotifications({
+        async send() { throw new Error("offline"); },
+      }, { stateDir, now: new Date(`2026-01-01T0${hour}:00:00Z`) });
+    }
+    const duplicateAfterFailure = await queueNotification(event, { stateDir });
+    assert.equal(duplicateAfterFailure.status, "skipped");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("the detailed local view lists redacted locations and correction guidance", () => {
+  const detail = detailedSecurityReport(findingsResult());
+  assert.match(detail, /Posible secreto expuesto/);
+  assert.match(detail, /Ubicación: config\.txt/);
+  assert.match(detail, /Cómo corregirlo/);
+  assert.match(detail, /revoca y rota la credencial/);
+  assert.doesNotMatch(detail, new RegExp(SECRET));
+});
+
+test("the action menu and command reference explain the available DMsecurity actions", () => {
+  const menu = actionMenu();
+  assert.match(menu, /1\. login/);
+  assert.match(menu, /4\. comandos/);
+  assert.match(menu, /5\. chequeo detallado/);
+  assert.doesNotMatch(menu, /verificación rápida/);
+  const commands = commandReference();
+  assert.match(commands, /Comando/);
+  assert.match(commands, /Qué hace/);
+  assert.match(commands, /Ingresa un comando de la tabla o presiona 0 para regresar/);
 });
 
 test("a transport can report a safe failure stage without persisting provider details", async () => {
@@ -166,6 +238,9 @@ test("WhatsApp transport needs only a recipient, never a cloud API token", async
     assert.deepEqual(await loadWhatsAppSettings(environment), { version: 1, recipient: "5215550000000" });
     assert.deepEqual(await whatsAppOptionsFromEnvironment(environment), { recipient: "5215550000000" });
     assert.equal((await stat(join(configuration, "whatsapp.json"))).mode & 0o777, 0o600);
+    await saveSecurityTarget("/tmp/project", "main", environment);
+    assert.deepEqual(await loadSecurityTarget(environment), { version: 1, repository: "/tmp/project", ref: "main" });
+    assert.equal((await stat(join(configuration, "target.json"))).mode & 0o777, 0o600);
   } finally {
     await rm(configuration, { recursive: true, force: true });
   }

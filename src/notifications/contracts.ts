@@ -11,6 +11,13 @@ export interface NotificationFailure {
   stage: NotificationFailureStage;
 }
 
+/** Aggregate-only finding detail that is safe to send outside the machine. */
+export interface NotificationFindingBreakdown {
+  scanner: ScannerName;
+  type: "dependency" | "secret";
+  count: number;
+}
+
 export interface NotificationEvent {
   id: string;
   occurredAt: string;
@@ -20,6 +27,8 @@ export interface NotificationEvent {
   commit: string | null;
   status: AnalysisStatus;
   findingCount: number;
+  /** Optional for compatibility with alerts queued by earlier versions. */
+  findingBreakdown?: NotificationFindingBreakdown[];
   scannerStates: Array<{ scanner: ScannerName; status: string }>;
   trigger: NotificationTrigger;
 }

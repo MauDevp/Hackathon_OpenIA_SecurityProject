@@ -1,7 +1,13 @@
 import { chmod, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, type ConnectionState, type WASocket } from "@whiskeysockets/baileys";
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  type ConnectionState,
+  type WAMessage,
+  type WASocket,
+} from "@whiskeysockets/baileys";
 import QRCode from "qrcode-terminal";
 
 import type { NotificationFailureStage, NotificationTransport } from "./contracts.js";
@@ -48,6 +54,29 @@ export interface WhatsAppLoginOptions {
   connectTimeoutMs?: number;
   /** Makes the QR renderer testable without capturing stdout. */
   onQr?: (value: string) => void;
+}
+
+export interface IncomingAdminMessage {
+  /** Baileys message identifier, used only to prevent repeated processing. */
+  id: string;
+  /** Resolved direct JID of the configured administrator. */
+  sender: string;
+  /** Plain text only. Media and document payloads are intentionally ignored. */
+  text: string;
+}
+
+export interface WhatsAppAdminChat {
+  /** The exact direct WhatsApp JID that is authorized for this session. */
+  readonly administratorJid: string;
+  /** Sends an already-redacted response through the existing connected socket. */
+  sendText(text: string): Promise<void>;
+  /** Uses this same socket to drain ordinary alert notifications without a second login. */
+  notificationTransport(): NotificationTransport;
+  /** Incoming messages are filtered to direct messages from administratorJid. */
+  onMessage(handler: (message: IncomingAdminMessage) => Promise<void>): void;
+  /** Resolves only when the WhatsApp connection closes unexpectedly. */
+  waitUntilClosed(): Promise<void>;
+  close(): Promise<void>;
 }
 
 type SocketFactory = (options: Parameters<typeof makeWASocket>[0]) => WASocket;
@@ -123,7 +152,7 @@ export async function whatsAppOptionsFromEnvironment(environment: NodeJS.Process
   const recipient = environment.DMSECURITY_WHATSAPP_RECIPIENT ?? (await loadWhatsAppSettings(environment))?.recipient;
   if (!recipient) {
     throw new WhatsAppConfigurationError(
-      "Run 'guardia onboard' or set DMSECURITY_WHATSAPP_RECIPIENT to the international destination number, then run 'guardia whatsapp login' to link a phone by QR.",
+      "Run 'dmsecurity onboard' or set DMSECURITY_WHATSAPP_RECIPIENT to the international destination number, then run 'dmsecurity --login' to link a phone by QR.",
       "configuration",
     );
   }
@@ -173,7 +202,7 @@ function disconnectStatus(update: Partial<ConnectionState>): unknown {
 
 function connectionMessage(update: Partial<ConnectionState>): string {
   const status = disconnectStatus(update);
-  if (status === 401) return "WhatsApp session is no longer valid; run 'guardia whatsapp login' to link it again.";
+  if (status === 401) return "WhatsApp session is no longer valid; run 'dmsecurity --login' to link it again.";
   return "Could not connect to WhatsApp. Check the linked device and try again.";
 }
 
@@ -192,7 +221,7 @@ function waitForOpen(
       else if (result) resolve(result);
     };
     const timeout = setTimeout(
-      () => finish(undefined, new WhatsAppConfigurationError("Timed out waiting for WhatsApp. Run 'guardia whatsapp login' and scan a current QR code.", "connection")),
+      () => finish(undefined, new WhatsAppConfigurationError("Timed out waiting for WhatsApp. Run 'dmsecurity --login' and scan a current QR code.", "connection")),
       timeoutMs,
     );
     socket.ev.on("connection.update", (update) => {
@@ -211,6 +240,56 @@ async function closeSocket(socket: WASocket): Promise<void> {
     await socket.end(undefined);
   } catch {
     // Closing is best-effort. It must not turn a sent notification into a failure.
+  }
+}
+
+function safeTextFromMessage(message: WAMessage): string | null {
+  const content = message.message;
+  if (!content) return null;
+  const nested = content.ephemeralMessage?.message
+    ?? content.viewOnceMessage?.message
+    ?? content.viewOnceMessageV2?.message
+    ?? content.viewOnceMessageV2Extension?.message;
+  const text = content.conversation ?? content.extendedTextMessage?.text ?? nested?.conversation ?? nested?.extendedTextMessage?.text;
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  // Limit work and prevent a chat input from becoming a general transport.
+  return trimmed.length > 0 && trimmed.length <= 160 ? trimmed : null;
+}
+
+/** Pure authorization gate: never accept groups, self-messages or other contacts. */
+export function isAuthorizedAdminMessage(
+  message: Pick<WAMessage, "key">,
+  administratorJid: string,
+  options: { allowOwnMessages?: boolean; sentByDmsecurity?: ReadonlySet<string> } = {},
+): boolean {
+  const remoteJid = message.key.remoteJid;
+  const alternateJid = message.key.remoteJidAlt;
+  const isDirectConversation = typeof remoteJid === "string"
+    && (remoteJid.endsWith("@s.whatsapp.net") || remoteJid.endsWith("@lid"));
+  const isAdministrator = isDirectConversation
+    // Baileys can expose a LID as remoteJid and the phone JID as remoteJidAlt.
+    // Match either value only to the pre-resolved configured administrator.
+    && (remoteJid === administratorJid || alternateJid === administratorJid);
+  if (!isAdministrator) return false;
+  if (message.key.fromMe !== true) return true;
+  // When the administrator deliberately uses the same WhatsApp account that
+  // scanned the QR, their command arrives as fromMe. Accept that one case,
+  // while refusing every message that this DMsecurity process just sent.
+  const id = message.key.id;
+  return options.allowOwnMessages === true
+    && typeof id === "string"
+    && !options.sentByDmsecurity?.has(id);
+}
+
+async function sendText(socket: WASocket, jid: string, text: string): Promise<string> {
+  try {
+    const message = await socket.sendMessage(jid, { text });
+    const id = message?.key.id;
+    if (!id) throw new Error("missing message id");
+    return id;
+  } catch {
+    throw new WhatsAppConfigurationError("WhatsApp did not confirm the message delivery.", "delivery");
   }
 }
 
@@ -234,7 +313,7 @@ async function connect(
       throw new WhatsAppConfigurationError("Could not connect to WhatsApp. Check the linked device and try again.", "connection");
     }
   }
-  throw new WhatsAppConfigurationError("WhatsApp requested repeated connection restarts. Run 'guardia whatsapp login' again.", "connection");
+  throw new WhatsAppConfigurationError("WhatsApp requested repeated connection restarts. Run 'dmsecurity --login' again.", "connection");
 }
 
 /** Opens a QR login session. The caller must scan it in WhatsApp > Linked devices. */
@@ -264,18 +343,80 @@ export function createWhatsAppTransport(options: WhatsAppOptions): NotificationT
       const connection = await connect(options);
       try {
         const jid = await resolveRecipient(connection.socket, options.recipient);
-        let message: Awaited<ReturnType<WASocket["sendMessage"]>>;
-        try {
-          message = await connection.socket.sendMessage(jid, { text: formatWhatsAppMessage(event) });
-        } catch {
-          throw new WhatsAppConfigurationError("WhatsApp did not confirm the message delivery.", "delivery");
-        }
-        const id = message?.key.id;
-        return { providerMessageId: typeof id === "string" ? id.slice(0, 128) : "accepted" };
+        await sendText(connection.socket, jid, formatWhatsAppMessage(event));
+        return { providerMessageId: "accepted" };
       } finally {
         await connection.close();
       }
     },
+  };
+}
+
+/**
+ * Opens a long-lived, local WhatsApp Web socket for the secure administrator
+ * chat. Ordinary alerts can share this socket, avoiding concurrent linked
+ * device sessions. This function does not parse or execute commands.
+ */
+export async function openWhatsAppAdminChat(options: WhatsAppOptions): Promise<WhatsAppAdminChat> {
+  const connection = await connect(options);
+  let administratorJid: string;
+  try {
+    administratorJid = await resolveRecipient(connection.socket, options.recipient);
+  } catch (error) {
+    await connection.close();
+    throw error;
+  }
+  const ownPhone = connection.socket.user?.id?.split("@")[0]?.split(":")[0];
+  const allowOwnMessages = ownPhone !== undefined && administratorJid === `${ownPhone}@s.whatsapp.net`;
+  let handler: ((message: IncomingAdminMessage) => Promise<void>) | undefined;
+  const seen = new Set<string>();
+  const sentByDmsecurity = new Set<string>();
+  const rememberSent = (id: string): void => {
+    sentByDmsecurity.add(id);
+    if (sentByDmsecurity.size > 256) sentByDmsecurity.delete(sentByDmsecurity.values().next().value as string);
+  };
+  let closedResolve: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => {
+    closedResolve = resolve;
+  });
+
+  connection.socket.ev.on("connection.update", (update) => {
+    if (update.connection === "close") closedResolve?.();
+  });
+  connection.socket.ev.on("messages.upsert", (update) => {
+    if (update.type !== "notify") return;
+    for (const message of update.messages) {
+      if (!isAuthorizedAdminMessage(message, administratorJid, { allowOwnMessages, sentByDmsecurity })) continue;
+      const id = message.key.id;
+      const text = safeTextFromMessage(message);
+      if (!id || !text || seen.has(id)) continue;
+      seen.add(id);
+      if (seen.size > 256) seen.delete(seen.values().next().value as string);
+      const currentHandler = handler;
+      if (currentHandler) {
+        void currentHandler({ id, sender: administratorJid, text }).catch(() => undefined);
+      }
+    }
+  });
+
+  return {
+    administratorJid,
+    async sendText(text) {
+      rememberSent(await sendText(connection.socket, administratorJid, text));
+    },
+    notificationTransport() {
+      return {
+        async send(event) {
+          rememberSent(await sendText(connection.socket, administratorJid, formatWhatsAppMessage(event)));
+          return { providerMessageId: "accepted" };
+        },
+      };
+    },
+    onMessage(next) {
+      handler = next;
+    },
+    waitUntilClosed: () => closed,
+    close: () => connection.close(),
   };
 }
 

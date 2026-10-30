@@ -157,5 +157,5 @@ if [ "$onboard" -eq 1 ] && [ -t 0 ] && [ -t 1 ]; then
   export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$DB_DIR"
   node "$ROOT/dist/cli/index.js" onboard
 elif [ "$onboard" -eq 1 ]; then
-  log "interactive configuration skipped (no terminal); run 'guardia onboard' from a terminal when ready"
+  log "interactive configuration skipped (no terminal); run 'dmsecurity onboard' from a terminal when ready"
 fi
