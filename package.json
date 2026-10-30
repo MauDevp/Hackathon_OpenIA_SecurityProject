@@ -9,7 +9,8 @@
     "node": ">=22"
   },
   "bin": {
-    "guardia": "./dist/cli/index.js"
+    "guardia": "./dist/cli/index.js",
+    "dmsecurity": "./dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -17,6 +18,7 @@
     "test": "node --test --import tsx 'tests/**/*.test.ts'",
     "clean": "rm -rf dist",
     "setup": "npm run build && bash scripts/setup.sh",
+    "command:install": "bash scripts/install-command.sh",
     "scan": "GUARDIA_OSV_SCANNER_BIN=$PWD/.guardia/tools/osv-scanner GUARDIA_GITLEAKS_BIN=$PWD/.guardia/tools/gitleaks OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY=$PWD/.guardia/osv-db node dist/cli/index.js scan",
     "scan:scheduled": "bash scripts/scheduled-scan.sh"
   },

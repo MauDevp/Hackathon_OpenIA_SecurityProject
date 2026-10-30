@@ -11,6 +11,20 @@ import { notificationStateDir } from "./state.js";
 
 const CONNECT_TIMEOUT_MS = 45_000;
 
+/**
+ * libsignal logs entire ratchet sessions with console.info/warn in a few code
+ * paths, including message-session rotation. Filter only those exact upstream
+ * calls for the whole lifecycle, before any socket can be created.
+ */
+const originalConsoleInfo = console.info;
+const originalConsoleWarn = console.warn;
+console.info = (...values: unknown[]) => {
+  if (values[0] !== "Closing session:") originalConsoleInfo(...values);
+};
+console.warn = (...values: unknown[]) => {
+  if (values[0] !== "Session already closed") originalConsoleWarn(...values);
+};
+
 export class WhatsAppConfigurationError extends Error {
   constructor(message: string) {
     super(message);
@@ -189,24 +203,10 @@ function waitForOpen(
 }
 
 async function closeSocket(socket: WASocket): Promise<void> {
-  // libsignal currently writes complete ratchet sessions with console.info when
-  // closing. Suppress only those upstream messages: authentication material
-  // must never reach a user's terminal or logs.
-  const originalInfo = console.info;
-  const originalWarn = console.warn;
-  console.info = (...values: unknown[]) => {
-    if (values[0] !== "Closing session:") originalInfo(...values);
-  };
-  console.warn = (...values: unknown[]) => {
-    if (values[0] !== "Session already closed") originalWarn(...values);
-  };
   try {
     await socket.end(undefined);
   } catch {
     // Closing is best-effort. It must not turn a sent notification into a failure.
-  } finally {
-    console.info = originalInfo;
-    console.warn = originalWarn;
   }
 }
 
@@ -267,18 +267,6 @@ export function createWhatsAppTransport(options: WhatsAppOptions): NotificationT
       }
     },
   };
-}
-
-/** Confirms setup without exposing repository data, reports or credentials. */
-export async function sendWhatsAppConfigurationCompleted(options: WhatsAppOptions): Promise<void> {
-  recipientPhone(options.recipient);
-  const connection = await connect(options);
-  try {
-    const jid = await resolveRecipient(connection.socket, options.recipient);
-    await connection.socket.sendMessage(jid, { text: "DMsecurity · La configuración ha sido completada." });
-  } finally {
-    await connection.close();
-  }
 }
 
 /** Test seam: verifies connection and QR behavior without contacting WhatsApp. */

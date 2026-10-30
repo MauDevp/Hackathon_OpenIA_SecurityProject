@@ -41,8 +41,13 @@ test("formats a redacted event and deduplicates delivered WhatsApp notifications
     const event = eventFromAnalysis(findingsResult(), `api-${SECRET}`, "HEAD", "scheduled");
     const message = formatWhatsAppMessage(event);
     assert.doesNotMatch(message, new RegExp(SECRET));
+    assert.match(message, /DMsecurity 🛡️/);
     assert.match(message, /Revisé:/);
     assert.match(message, /Mejora recomendada:/);
+
+    const onboardingMessage = formatWhatsAppMessage({ ...event, trigger: "onboarding" });
+    assert.match(onboardingMessage, /Configuración completada/);
+    assert.match(onboardingMessage, /Resumen de la primera revisión/);
 
     const first = await queueNotification(event, { stateDir });
     const duplicate = await queueNotification(event, { stateDir });

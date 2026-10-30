@@ -91,7 +91,8 @@ export function formatWhatsAppMessage(event: NotificationEvent): string {
       ? `Resultado: se detectaron ${event.findingCount} hallazgo(s).`
       : "Resultado: no se completó toda la cobertura.";
   const lines = [
-    `DMsecurity · ${title}`,
+    `DMsecurity 🛡️ · ${title}`,
+    ...(event.trigger === "onboarding" ? ["✅ Configuración completada. Resumen de la primera revisión:"] : []),
     `Proyecto: ${redactSecrets(event.repository)} · objetivo: ${redactSecrets(commit)}`,
     `Revisé: ${scannerReview(event)}`,
     outcome,

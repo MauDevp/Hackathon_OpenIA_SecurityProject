@@ -34,9 +34,9 @@ con cobertura suficiente; no significa que el commit sea seguro.
 - La instalación interactiva pregunta una vez el repositorio, destinatario,
   intervalo y política del hook; guarda la preferencia local y activa sólo los
   componentes que la persona confirme.
-- Al finalizar, confirma por WhatsApp que la configuración se completó y
-  ejecuta la primera verificación; comunica también ese resultado aunque sea
-  `PASS`.
+- Al finalizar, ejecuta la primera verificación y envía una sola alerta por
+  WhatsApp que confirma la configuración completada e incluye el resumen de
+  ese resultado, incluso si es `PASS`.
 
 ## Estado actual que se reutiliza
 
@@ -98,7 +98,7 @@ interface NotificationEvent {
   status: "PASS" | "FINDINGS" | "INCOMPLETE";
   findingCount: number;
   scannerStates: Array<{ scanner: "osv" | "gitleaks"; status: string }>;
-  trigger: "scheduled" | "pre_commit";
+  trigger: "scheduled" | "pre_commit" | "manual" | "onboarding";
 }
 
 interface NotificationTransport {
@@ -124,14 +124,14 @@ configuración versionada; tampoco se pasan a OSV-Scanner ni Gitleaks.
 ### Contenido permitido
 
 ```text
-DMsecurity · FINDINGS
+DMsecurity 🛡️ · FINDINGS
 Repo: mi-api · commit: abcd123
 Hallazgos: 2 · OSV: ok · Gitleaks: ok
 Acción: revisa el reporte local antes de continuar.
 ```
 
 ```text
-DMsecurity · INCOMPLETE
+DMsecurity 🛡️ · INCOMPLETE
 Repo: mi-api · commit: abcd123
 No se pudo completar toda la cobertura. Revisa la instalación local.
 ```

@@ -103,15 +103,24 @@ cd dmsecurity
 bash scripts/install.sh
 ```
 
+After installation, use the local command from a terminal whose `PATH` includes
+`~/.local/bin`:
+
+```bash
+dmsecurity --login   # link WhatsApp with a QR code
+dmsecurity --logout  # remove the local linked-device session
+dmsecurity onboard   # guided repository, alert and hook setup
+```
+
 The setup assistant asks before linking WhatsApp, enabling a systemd user timer
 or installing a Git pre-commit hook. It never overwrites an existing hook.
 Your WhatsApp recipient is stored privately in
 `~/.config/dmsecurity/whatsapp.json`, so it does not need to be exported again.
-After configuration, it sends `DMsecurity · La configuración ha sido completada.`
-and immediately runs the first verification; that result is also notified,
-including a clean `PASS` result. Each alert states whether it reviewed known
-dependency vulnerabilities and exposed secrets, then gives a safe next-step
-recommendation without sending source code, paths or secret values.
+After configuration, it immediately runs the first verification and sends one
+WhatsApp alert headed `DMsecurity 🛡️`: it confirms the completed configuration,
+summarizes the first result (including a clean `PASS`) and states what was
+reviewed. Each alert ends with a safe next-step recommendation without sending
+source code, paths or secret values.
 
 What `bash scripts/install.sh` does, so you can trust it:
 

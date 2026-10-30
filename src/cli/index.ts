@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -26,7 +27,6 @@ import {
   createWhatsAppTransport,
   loginWhatsApp,
   resetWhatsAppSession,
-  sendWhatsAppConfigurationCompleted,
   whatsAppOptionsFromEnvironment,
 } from "../notifications/whatsapp.js";
 import { loadWhatsAppSettings, saveWhatsAppSettings } from "../notifications/settings.js";
@@ -67,7 +67,8 @@ function usage(): string {
     "  guardia scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]",
     "  guardia check-staged --repo <path> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]",
     "  guardia onboard",
-    "  guardia whatsapp login | reset",
+    "  dmsecurity --login | --logout",
+    "  guardia whatsapp login | reset | logout",
     "  guardia notify --report <report.json> [--repo-alias <name>] [--ref <ref>] [--trigger scheduled|pre_commit|manual]",
     "  guardia schedule add --repo <path> --ref <git-ref> --every <30m|6h|1d> --notify <whatsapp|none> [--on findings,incomplete]",
     "  guardia schedule list | remove --id <id>",
@@ -324,10 +325,12 @@ async function runNotify(argv: string[]): Promise<number> {
 }
 
 async function runWhatsApp(argv: string[]): Promise<number> {
-  if (argv.length !== 2 || (argv[1] !== "login" && argv[1] !== "reset")) throw new CliError("Expected 'whatsapp login' or 'whatsapp reset'.");
-  if (argv[1] === "reset") {
+  if (argv.length !== 2 || (argv[1] !== "login" && argv[1] !== "reset" && argv[1] !== "logout")) {
+    throw new CliError("Expected 'whatsapp login', 'whatsapp logout' or 'whatsapp reset'.");
+  }
+  if (argv[1] === "reset" || argv[1] === "logout") {
     await resetWhatsAppSession();
-    process.stdout.write("Local WhatsApp session removed. Unlink the DMsecurity device from WhatsApp on the phone before linking again.\n");
+    process.stdout.write("Sesión local de WhatsApp cerrada. Elimina también el dispositivo DMsecurity desde WhatsApp en el celular.\n");
     return 0;
   }
   await loginWhatsApp();
@@ -572,15 +575,6 @@ async function runOnboard(): Promise<number> {
     }
 
     process.stdout.write(setupStep(4, "Primera verificación", "Se revisarán dependencias vulnerables y secretos expuestos."));
-    if (configureWhatsApp) {
-      try {
-        await sendWhatsAppConfigurationCompleted(await whatsAppOptionsFromEnvironment());
-        process.stdout.write(setupSuccess("Confirmación de configuración enviada por WhatsApp."));
-      } catch {
-        process.stdout.write(setupError("No se pudo enviar la confirmación de WhatsApp. Verifica el destinatario y su código de país."));
-      }
-    }
-
     useInstalledScannersForOnboarding();
     const firstScan = await executeScan({
       repo: repository,
@@ -591,10 +585,10 @@ async function runOnboard(): Promise<number> {
     process.stdout.write(setupResult(firstScan.result.status, firstScan.result.findings.length));
     process.stdout.write(`\n${terminalSummary(firstScan.result, firstScan.output)}`);
     if (configureWhatsApp) {
-      const status = await notifyAnalysis(firstScan.result, repository, reference, "manual", ["pass", "findings", "incomplete"]);
+      const status = await notifyAnalysis(firstScan.result, repository, reference, "onboarding", ["pass", "findings", "incomplete"]);
       process.stdout.write(status === "sent"
-        ? setupSuccess("Resultado de la primera verificación enviado por WhatsApp.")
-        : setupWarning(`Resultado de la primera verificación: ${status}.`));
+        ? setupSuccess("Configuración completada y resumen de la primera verificación enviados por WhatsApp.")
+        : setupWarning(`No se pudo enviar el resumen de configuración y primera verificación: ${status}.`));
     }
 
     process.stdout.write(`\n${setupSuccess("Configuración terminada. Tu repositorio ya tiene una primera línea de defensa.")}`);
@@ -610,6 +604,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   try {
+    if (argv.length === 1 && argv[0] === "--login") return await runWhatsApp(["whatsapp", "login"]);
+    if (argv.length === 1 && argv[0] === "--logout") return await runWhatsApp(["whatsapp", "logout"]);
     if (argv[0] === "scan") {
       const args = parseArguments(argv);
       const { result, output } = await executeScan(args);
@@ -639,7 +635,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
 const invokedPath = process.argv[1];
 const invokedAsProgram = invokedPath !== undefined
-  && import.meta.url === pathToFileURL(resolve(invokedPath)).href;
+  && import.meta.url === pathToFileURL(realpathSync(invokedPath)).href;
 if (invokedAsProgram) {
   void main().then((exitCode) => {
     process.exitCode = exitCode;

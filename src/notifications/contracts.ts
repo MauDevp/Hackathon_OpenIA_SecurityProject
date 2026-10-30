@@ -1,6 +1,7 @@
 import type { AnalysisStatus, ScannerName } from "../contracts.js";
 
-export type NotificationTrigger = "scheduled" | "pre_commit" | "manual";
+/** `onboarding` is the first review sent after the guided setup finishes. */
+export type NotificationTrigger = "scheduled" | "pre_commit" | "manual" | "onboarding";
 export type NotificationStatus = "queued" | "sent" | "failed" | "skipped";
 export type NotificationKind = "pass" | "findings" | "incomplete";
 

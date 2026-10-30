@@ -12,3 +12,4 @@ command -v npm >/dev/null || {
 
 npm install
 npm run setup -- "$@"
+bash "$ROOT/scripts/install-command.sh"
